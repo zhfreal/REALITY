@@ -186,16 +186,18 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 	}
 	return nil
 
-	if err := hs.readClientCertificate(); err != nil {
-		return err
-	}
-	if err := hs.readClientFinished(); err != nil {
-		return err
-	}
+	/*
+		if err := hs.readClientCertificate(); err != nil {
+			return err
+		}
+		if err := hs.readClientFinished(); err != nil {
+			return err
+		}
 
-	c.isHandshakeComplete.Store(true)
+		c.isHandshakeComplete.Store(true)
 
-	return nil
+		return nil
+	*/
 }
 
 func (hs *serverHandshakeStateTLS13) processClientHello() error {

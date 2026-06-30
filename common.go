@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -556,6 +557,7 @@ type Config struct {
 	Xver byte
 
 	ServerNames  map[string]bool
+	ServerNamePatterns []*regexp.Regexp
 	PrivateKey   []byte
 	MinClientVer []byte
 	MaxClientVer []byte
@@ -961,6 +963,31 @@ func (c *Config) ticketKeyFromBytes(b [32]byte) (key ticketKey) {
 // ticket, and the lifetime we set for all tickets we send.
 const maxSessionTicketLifetime = 7 * 24 * time.Hour
 
+func (c *Config) CompileServerNamePatterns() {
+	c.ServerNamePatterns = []*regexp.Regexp{}
+	for name := range c.ServerNames {
+		if strings.Contains(name, "*") {
+			escaped := regexp.QuoteMeta(name)
+			pattern := "^" + strings.ReplaceAll(escaped, "\\*", ".*") + "$"
+			if re, err := regexp.Compile(pattern); err == nil {
+				c.ServerNamePatterns = append(c.ServerNamePatterns, re)
+			}
+		}
+	}
+}
+
+func (c *Config) MatchServerName(name string) bool {
+	if c.ServerNames[name] {
+		return true
+	}
+	for _, re := range c.ServerNamePatterns {
+		if re.MatchString(name) {
+			return true
+		}
+	}
+	return false
+}
+
 // Clone returns a shallow clone of c or nil if c is nil. It is safe to clone a [Config] that is
 // being used concurrently by a TLS client or server.
 func (c *Config) Clone() *Config {
@@ -976,6 +1003,7 @@ func (c *Config) Clone() *Config {
 		Dest:                                c.Dest,
 		Xver:                                c.Xver,
 		ServerNames:                         c.ServerNames,
+		ServerNamePatterns:                  c.ServerNamePatterns,
 		PrivateKey:                          c.PrivateKey,
 		MinClientVer:                        c.MinClientVer,
 		MaxClientVer:                        c.MaxClientVer,
