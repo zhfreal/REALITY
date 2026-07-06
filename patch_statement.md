@@ -31,7 +31,7 @@ This document details the modifications applied to the custom `reality` module r
 * **Problem**: REALITY originally checked incoming ClientHello SNIs against an exact lookup map of configured `ServerNames`, which prevented the use of wildcard patterns (like `*.example.com` or `*`).
 * **Solution**:
   - Extended `Config` struct in `common.go` to hold `ServerNamePatterns []*regexp.Regexp`.
-  - Added `CompileServerNamePatterns()` method in `common.go` to compile wildcards (translating `*` to `.*` regex) at setup time.
+  - Added `CompileServerNamePatterns()` method in `common.go` to compile wildcards (translating `*` to `[^.]+` regex to strictly match a single subdomain level) at setup time.
   - Added `MatchServerName(name string)` in `common.go` to evaluate exact matches first, then match against compiled regex patterns.
   - Updated `record_detect.go` (`GetProbeSNI()`) to dynamically translate wildcard patterns to concrete hostnames (e.g. `*.example.com` -> `www.example.com`) to ensure that outbound probing TLS handshakes succeed.
   - Updated `tls.go` to check incoming connection SNIs using `config.MatchServerName(...)` rather than map lookups.
