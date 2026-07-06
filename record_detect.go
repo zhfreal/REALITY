@@ -29,7 +29,11 @@ func GetConcreteDomain(pattern string) string {
 	return strings.ReplaceAll(pattern, "*", "a")
 }
 
-func GetProbeSNI(config *Config) string {
+func GetProbeSNI(config *Config, pattern string) string {
+	concrete := GetConcreteDomain(pattern)
+	if concrete != "" {
+		return concrete
+	}
 	host, _, err := net.SplitHostPort(config.Dest)
 	if err != nil {
 		host = config.Dest
@@ -37,99 +41,95 @@ func GetProbeSNI(config *Config) string {
 	if net.ParseIP(host) == nil && host != "" {
 		return host
 	}
-	for pattern := range config.ServerNames {
-		concrete := GetConcreteDomain(pattern)
-		if concrete != "" {
-			return concrete
-		}
-	}
 	return ""
 }
 
 func DetectPostHandshakeRecordsLens(config *Config) {
-	probeSNI := GetProbeSNI(config)
-	if probeSNI == "" {
-		return
-	}
-	for alpn := range 3 { // 0, 1, 2
-		alpn := alpn
-		key := config.Dest + " " + strconv.Itoa(alpn)
-		if _, loaded := GlobalPostHandshakeRecordsLens.LoadOrStore(key, false); !loaded {
-			go func() {
-				defer func() {
-					val, _ := GlobalPostHandshakeRecordsLens.Load(key)
-					if _, ok := val.(bool); ok {
-						GlobalPostHandshakeRecordsLens.Store(key, []int{})
+	for pattern := range config.ServerNames {
+		probeSNI := GetProbeSNI(config, pattern)
+		if probeSNI == "" {
+			continue
+		}
+		for alpn := range 3 { // 0, 1, 2
+			alpn := alpn
+			key := config.Dest + " " + pattern + " " + strconv.Itoa(alpn)
+			if _, loaded := GlobalPostHandshakeRecordsLens.LoadOrStore(key, false); !loaded {
+				go func() {
+					defer func() {
+						val, _ := GlobalPostHandshakeRecordsLens.Load(key)
+						if _, ok := val.(bool); ok {
+							GlobalPostHandshakeRecordsLens.Store(key, []int{})
+						}
+					}()
+					target, err := net.Dial(config.Type, config.Dest)
+					if err != nil {
+						return
+					}
+					defer target.Close()
+					if config.Xver == 1 || config.Xver == 2 {
+						if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
+							return
+						}
+					}
+					detectConn := &PostHandshakeRecordDetectConn{
+						Conn: target,
+						Key:  key,
+					}
+					fingerprint := utls.HelloChrome_Auto
+					nextProtos := []string{"h2", "http/1.1"}
+					if alpn != 2 {
+						fingerprint = utls.HelloGolang
+					}
+					if alpn == 1 {
+						nextProtos = []string{"http/1.1"}
+					}
+					if alpn == 0 {
+						nextProtos = nil
+					}
+					uConn := utls.UClient(detectConn, &utls.Config{
+						ServerName: probeSNI,
+						NextProtos: nextProtos,
+					}, fingerprint)
+					if err = uConn.Handshake(); err != nil {
+						return
+					}
+					io.Copy(io.Discard, uConn)
+				}()
+				go func() {
+					target, err := net.Dial(config.Type, config.Dest)
+					if err != nil {
+						return
+					}
+					defer target.Close()
+					if config.Xver == 1 || config.Xver == 2 {
+						if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
+							return
+						}
+					}
+					fingerprint := utls.HelloChrome_Auto
+					nextProtos := []string{"h2", "http/1.1"}
+					if alpn != 2 {
+						fingerprint = utls.HelloGolang
+					}
+					if alpn == 1 {
+						nextProtos = []string{"http/1.1"}
+					}
+					if alpn == 0 {
+						nextProtos = nil
+					}
+					conn := &CCSDetectConn{
+						Conn: target,
+						Key:  key,
+					}
+					uConn := utls.UClient(conn, &utls.Config{
+						ServerName: probeSNI,
+						NextProtos: nextProtos,
+					}, fingerprint)
+					if err = uConn.Handshake(); err != nil {
+						return
 					}
 				}()
-				target, err := net.Dial(config.Type, config.Dest)
-				if err != nil {
-					return
-				}
-				defer target.Close()
-				if config.Xver == 1 || config.Xver == 2 {
-					if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
-						return
-					}
-				}
-				detectConn := &PostHandshakeRecordDetectConn{
-					Conn: target,
-					Key:  key,
-				}
-				fingerprint := utls.HelloChrome_Auto
-				nextProtos := []string{"h2", "http/1.1"}
-				if alpn != 2 {
-					fingerprint = utls.HelloGolang
-				}
-				if alpn == 1 {
-					nextProtos = []string{"http/1.1"}
-				}
-				if alpn == 0 {
-					nextProtos = nil
-				}
-				uConn := utls.UClient(detectConn, &utls.Config{
-					ServerName: probeSNI,
-					NextProtos: nextProtos,
-				}, fingerprint)
-				if err = uConn.Handshake(); err != nil {
-					return
-				}
-				io.Copy(io.Discard, uConn)
-			}()
-			go func() {
-				target, err := net.Dial(config.Type, config.Dest)
-				if err != nil {
-					return
-				}
-				defer target.Close()
-				if config.Xver == 1 || config.Xver == 2 {
-					if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
-						return
-					}
-				}
-				fingerprint := utls.HelloChrome_Auto
-				nextProtos := []string{"h2", "http/1.1"}
-				if alpn != 2 {
-					fingerprint = utls.HelloGolang
-				}
-				if alpn == 1 {
-					nextProtos = []string{"http/1.1"}
-				}
-				if alpn == 0 {
-					nextProtos = nil
-				}
-				conn := &CCSDetectConn{
-					Conn: target,
-					Key:  key,
-				}
-				uConn := utls.UClient(conn, &utls.Config{
-					ServerName: probeSNI,
-					NextProtos: nextProtos,
-				}, fingerprint)
-				if err = uConn.Handshake(); err != nil {
-					return
-				}
-			}()
+			}
 		}
 	}
 }

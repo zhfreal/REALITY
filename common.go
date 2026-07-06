@@ -556,8 +556,9 @@ type Config struct {
 	Dest string
 	Xver byte
 
-	ServerNames  map[string]bool
-	ServerNamePatterns []*regexp.Regexp
+	ServerNames              map[string]bool
+	ServerNamePatterns       []*regexp.Regexp
+	ServerNamePatternStrings []string
 	PrivateKey   []byte
 	MinClientVer []byte
 	MaxClientVer []byte
@@ -965,27 +966,33 @@ const maxSessionTicketLifetime = 7 * 24 * time.Hour
 
 func (c *Config) CompileServerNamePatterns() {
 	c.ServerNamePatterns = []*regexp.Regexp{}
+	c.ServerNamePatternStrings = []string{}
 	for name := range c.ServerNames {
 		if strings.Contains(name, "*") {
 			escaped := regexp.QuoteMeta(name)
 			pattern := "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
 			if re, err := regexp.Compile(pattern); err == nil {
 				c.ServerNamePatterns = append(c.ServerNamePatterns, re)
+				c.ServerNamePatternStrings = append(c.ServerNamePatternStrings, name)
 			}
 		}
 	}
 }
 
 func (c *Config) MatchServerName(name string) bool {
+	return c.GetMatchedPattern(name) != ""
+}
+
+func (c *Config) GetMatchedPattern(name string) string {
 	if c.ServerNames[name] {
-		return true
+		return name
 	}
-	for _, re := range c.ServerNamePatterns {
+	for i, re := range c.ServerNamePatterns {
 		if re.MatchString(name) {
-			return true
+			return c.ServerNamePatternStrings[i]
 		}
 	}
-	return false
+	return ""
 }
 
 // Clone returns a shallow clone of c or nil if c is nil. It is safe to clone a [Config] that is
@@ -1004,6 +1011,7 @@ func (c *Config) Clone() *Config {
 		Xver:                                c.Xver,
 		ServerNames:                         c.ServerNames,
 		ServerNamePatterns:                  c.ServerNamePatterns,
+		ServerNamePatternStrings:            c.ServerNamePatternStrings,
 		PrivateKey:                          c.PrivateKey,
 		MinClientVer:                        c.MinClientVer,
 		MaxClientVer:                        c.MaxClientVer,

@@ -385,7 +385,11 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				break
 			}
 			for {
-				key := config.Dest + " "
+				matchedPattern := config.GetMatchedPattern(hs.clientHello.serverName)
+				if matchedPattern == "" {
+					matchedPattern = hs.clientHello.serverName
+				}
+				key := config.Dest + " " + matchedPattern + " "
 				if len(hs.clientHello.alpnProtocols) == 0 {
 					key += "0"
 				} else if hs.clientHello.alpnProtocols[0] == "h2" {
