@@ -9,7 +9,7 @@ This document details the modifications applied to the custom `reality` module r
 * **Base Upstream Commit**: `9234c772ba8f181f31c3e81dc2b4177322e5a9a9` (declaring support for `maxUselessRecords`)
 * **Fork Repository**: `github.com/zhfreal/REALITY`
 * **Development Branch**: `reality-wildcard-patches`
-* **Latest Local Patch Commit**: `2461661bec6139d917840df985d889e8d849246d`
+* **Latest Local Patch Commit**: `a575bb6dce3027ab5eb056b55b1d41719ca88b9c`
 
 ---
 
