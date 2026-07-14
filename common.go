@@ -964,6 +964,8 @@ func (c *Config) ticketKeyFromBytes(b [32]byte) (key ticketKey) {
 // ticket, and the lifetime we set for all tickets we send.
 const maxSessionTicketLifetime = 7 * 24 * time.Hour
 
+var globalServerNameRegexCache sync.Map
+
 func (c *Config) CompileServerNamePatterns() {
 	c.ServerNamePatterns = []*regexp.Regexp{}
 	c.ServerNamePatternStrings = []string{}
@@ -971,7 +973,12 @@ func (c *Config) CompileServerNamePatterns() {
 		if strings.Contains(name, "*") {
 			escaped := regexp.QuoteMeta(name)
 			pattern := "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
-			if re, err := regexp.Compile(pattern); err == nil {
+			
+			if val, ok := globalServerNameRegexCache.Load(pattern); ok {
+				c.ServerNamePatterns = append(c.ServerNamePatterns, val.(*regexp.Regexp))
+				c.ServerNamePatternStrings = append(c.ServerNamePatternStrings, name)
+			} else if re, err := regexp.Compile(pattern); err == nil {
+				globalServerNameRegexCache.Store(pattern, re)
 				c.ServerNamePatterns = append(c.ServerNamePatterns, re)
 				c.ServerNamePatternStrings = append(c.ServerNamePatternStrings, name)
 			}
