@@ -417,7 +417,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 						break
 					}
 				}
-				time.Sleep(5 * time.Second)
+				time.Sleep(100 * time.Millisecond)
 				if maxUseless, ok := GlobalMaxCSSMsgCount.Load(key); ok {
 					hs.c.MaxUselessRecords = maxUseless.(int)
 				}

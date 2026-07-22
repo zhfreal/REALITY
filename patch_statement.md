@@ -9,7 +9,7 @@ This document details the modifications applied to the custom `reality` module r
 * **Base Upstream Commit**: `9234c772ba8f181f31c3e81dc2b4177322e5a9a9` (declaring support for `maxUselessRecords`)
 * **Fork Repository**: `github.com/zhfreal/REALITY`
 * **Development Branch**: `reality-wildcard-patches`
-* **Latest Local Patch Commit**: `a575bb6dce3027ab5eb056b55b1d41719ca88b9c`
+* **Latest Local Patch Commit**: `36334fea314b15d344dfd1b353b3877aa1af48e4`
 
 ---
 
@@ -42,3 +42,11 @@ This document details the modifications applied to the custom `reality` module r
 * **Solution**:
   - **`handshake_server_tls13.go`**: Wrapped unreachable client certificate and finished reading routine logic (placed after an early `return nil`) in block comment delimiters (`/* ... */`).
   - **`tls.go`**: Replaced the faux `for peerPub != nil { ... break }` loop block with nested `if err == nil` statements. This maintains the clean step-by-step conditional flow without triggering the `surrounding loop is unconditionally terminated (SA4004)` linter warning. Removed the outer single-iteration `for` loop from the ClientHello processing goroutine.
+
+### 4. Handshake Setup Optimization & Safety Slicing Fix (`record_detect.go` & `tls.go`)
+* **Problem**: When restarting the remote Xray server, the very first client connection attempt suffered from a 5-second connection delay. This happened because the server's background probe connection set a 5-second read deadline via `io.ReadAll` while the client handshake loop slept for 5-second intervals. Additionally, any network read timeout or truncation would cause the `data = data[length:]` slice statement to panic with `slice bounds out of range`.
+* **Solution**:
+  - Reduced the background probe read deadline in `record_detect.go` from `5 * time.Second` to `1 * time.Second` to speed up the initial probe.
+  - Reduced the handshake loop check sleep in `tls.go` from `5 * time.Second` to `100 * time.Millisecond` to process the handshake as soon as results are cached.
+  - Added a boundary length check `if len(data) < length { break }` before the slicing operation in `record_detect.go`, fully preventing any potential out-of-bounds panics on partial reads.
+

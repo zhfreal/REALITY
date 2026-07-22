@@ -151,12 +151,15 @@ func (c *PostHandshakeRecordDetectConn) Read(b []byte) (n int, err error) {
 	if !c.CcsSent {
 		return c.Conn.Read(b)
 	}
-	c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	c.Conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	data, _ := io.ReadAll(c.Conn)
 	var postHandshakeRecordsLens []int
 	for {
 		if len(data) >= 5 && bytes.Equal(data[:3], []byte{23, 3, 3}) {
 			length := int(binary.BigEndian.Uint16(data[3:5])) + 5
+			if len(data) < length {
+				break
+			}
 			postHandshakeRecordsLens = append(postHandshakeRecordsLens, length)
 			data = data[length:]
 		} else {
