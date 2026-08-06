@@ -50,3 +50,11 @@ This document details the modifications applied to the custom `reality` module r
   - Reduced the handshake loop check sleep in `tls.go` from `5 * time.Second` to `100 * time.Millisecond` to process the handshake as soon as results are cached.
   - Added a boundary length check `if len(data) < length { break }` before the slicing operation in `record_detect.go`, fully preventing any potential out-of-bounds panics on partial reads.
 
+---
+
+### 5. Wildcard SNI Probe Prefixing & Sibling Fallbacks (August 2026 Patches)
+* **Random Alphanumeric Prefixing**: Modified `GetConcreteDomain` in `record_detect.go` to generate a 5-character lowercase alphanumeric random prefix for wildcard subdomains (replacing the hardcoded `www` prefix). This ensures every active probe uses a unique, fresh SNI and prevents middlebox routing cache bypass.
+* **Crypto Rand Fallback**: Added a fallback in `GetConcreteDomain` using `time.Now().UnixNano()` pseudo-random bytes in case `crypto/rand` fails due to entropy starvation at system boot.
+* **GetProbeSNI Sibling & IP Fallbacks**: Updated `GetProbeSNI` to verify if `config.Dest` host is an IP address. If the target destination is an IP and the pattern is `*`, it dynamically queries sibling domains defined in `config.ServerNames` to extract a valid fallback SNI.
+
+

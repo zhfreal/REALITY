@@ -2,6 +2,7 @@ package reality
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"io"
 	"math"
@@ -23,23 +24,49 @@ func GetConcreteDomain(pattern string) string {
 	if !strings.Contains(pattern, "*") {
 		return pattern
 	}
-	if strings.HasPrefix(pattern, "*.") {
-		return "www." + pattern[2:]
+	// Generate a random 5-character lowercase alphanumeric prefix
+	var rndBytes [5]byte
+	if _, err := rand.Read(rndBytes[:]); err != nil {
+		// Fallback to time-nanosecond pseudo-random bytes if crypto/rand fails
+		seed := uint64(time.Now().UnixNano())
+		for i := range rndBytes {
+			rndBytes[i] = byte(seed >> (i * 8))
+		}
 	}
-	return strings.ReplaceAll(pattern, "*", "a")
+	for i, b := range rndBytes {
+		rndBytes[i] = "abcdefghijklmnopqrstuvwxyz0123456789"[b%36]
+	}
+	randomPrefix := string(rndBytes[:])
+
+	if strings.HasPrefix(pattern, "*.") {
+		return randomPrefix + "." + pattern[2:]
+	}
+	return strings.ReplaceAll(pattern, "*", randomPrefix)
 }
 
 func GetProbeSNI(config *Config, pattern string) string {
-	concrete := GetConcreteDomain(pattern)
-	if concrete != "" {
-		return concrete
+	if pattern != "*" {
+		concrete := GetConcreteDomain(pattern)
+		if concrete != "" {
+			return concrete
+		}
 	}
+	// Fallback 1: Use host from config.Dest if it is a valid domain name (not an IP)
 	host, _, err := net.SplitHostPort(config.Dest)
 	if err != nil {
 		host = config.Dest
 	}
 	if net.ParseIP(host) == nil && host != "" {
 		return host
+	}
+	// Fallback 2: Sibling domains (useful when Dest is an IP and pattern is "*")
+	for sn := range config.ServerNames {
+		if sn != "*" {
+			c := GetConcreteDomain(sn)
+			if c != "" {
+				return c
+			}
+		}
 	}
 	return ""
 }
