@@ -384,6 +384,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			if err != nil {
 				break
 			}
+			pollCount := 0
 			for {
 				matchedPattern := config.GetMatchedPattern(hs.clientHello.serverName)
 				if matchedPattern == "" {
@@ -400,6 +401,9 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if val, ok := GlobalPostHandshakeRecordsLens.Load(key); ok {
 					if postHandshakeRecordsLens, ok := val.([]int); ok {
 						for _, length := range postHandshakeRecordsLens {
+							if length < 22 {
+								continue
+							}
 							plainText := make([]byte, length-16)
 							plainText[0] = 23
 							plainText[1] = 3
@@ -420,6 +424,10 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				time.Sleep(100 * time.Millisecond)
 				if maxUseless, ok := GlobalMaxCSSMsgCount.Load(key); ok {
 					hs.c.MaxUselessRecords = maxUseless.(int)
+				}
+				pollCount++
+				if pollCount > 10 {
+					break
 				}
 			}
 			hs.c.isHandshakeComplete.Store(true)

@@ -57,4 +57,12 @@ This document details the modifications applied to the custom `reality` module r
 * **Crypto Rand Fallback**: Added a fallback in `GetConcreteDomain` using `time.Now().UnixNano()` pseudo-random bytes in case `crypto/rand` fails due to entropy starvation at system boot.
 * **GetProbeSNI Sibling & IP Fallbacks**: Updated `GetProbeSNI` to verify if `config.Dest` host is an IP address. If the target destination is an IP and the pattern is `*`, it dynamically queries sibling domains defined in `config.ServerNames` to extract a valid fallback SNI.
 
+---
+
+### 6. Concurrency, Timeout & Slice Safety Hardening (August 2026 Audit)
+* **Named Return Data Race Fix (`record_detect.go`)**: Replaced named return variable `err` in the background goroutine inside `CCSDetectConn.Write` with a local `readErr` to prevent data races on return values during execution.
+* **Active Probing Connection & Handshake Timeouts (`record_detect.go`)**: Added `5 * time.Second` connection timeouts (`net.DialTimeout`) and handshake deadlines (`uConn.SetDeadline`) to active probe goroutines to prevent indefinite hangs if the remote destination drops SYN packets.
+* **Wildcard `*` Global Regex Fix (`common.go`)**: Fixed `CompileServerNamePatterns` so that `"*"` compiles to `^.+$` (matching multi-level domain names) instead of `^[^.]+$` (which only matched dotless hostnames).
+* **Slice Bounds & Polling Ceiling Fix (`tls.go`)**: Added a `length >= 22` check before slicing `make([]byte, length-16)` in `tls.go` to prevent negative-size slice panics. Added a 10-iteration ceiling to the post-handshake record polling loop to ensure connections do not block indefinitely if background probes fail.
+
 

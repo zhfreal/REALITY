@@ -88,7 +88,7 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 							GlobalPostHandshakeRecordsLens.Store(key, []int{})
 						}
 					}()
-					target, err := net.Dial(config.Type, config.Dest)
+					target, err := net.DialTimeout(config.Type, config.Dest, 5*time.Second)
 					if err != nil {
 						return
 					}
@@ -117,13 +117,14 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 						ServerName: probeSNI,
 						NextProtos: nextProtos,
 					}, fingerprint)
+					uConn.SetDeadline(time.Now().Add(5 * time.Second))
 					if err = uConn.Handshake(); err != nil {
 						return
 					}
 					io.Copy(io.Discard, uConn)
 				}()
 				go func() {
-					target, err := net.Dial(config.Type, config.Dest)
+					target, err := net.DialTimeout(config.Type, config.Dest, 5*time.Second)
 					if err != nil {
 						return
 					}
@@ -152,6 +153,7 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 						ServerName: probeSNI,
 						NextProtos: nextProtos,
 					}, fingerprint)
+					uConn.SetDeadline(time.Now().Add(5 * time.Second))
 					if err = uConn.Handshake(); err != nil {
 						return
 					}
@@ -211,8 +213,8 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 			defer hasAlert.Store(true)
 			buf := make([]byte, 512)
 			for {
-				_, err = c.Conn.Read(buf)
-				if err != nil {
+				_, readErr := c.Conn.Read(buf)
+				if readErr != nil {
 					return
 				}
 				if buf[0] == 0x15 {

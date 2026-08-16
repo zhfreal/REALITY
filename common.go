@@ -971,8 +971,13 @@ func (c *Config) CompileServerNamePatterns() {
 	c.ServerNamePatternStrings = []string{}
 	for name := range c.ServerNames {
 		if strings.Contains(name, "*") {
-			escaped := regexp.QuoteMeta(name)
-			pattern := "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
+			var pattern string
+			if name == "*" {
+				pattern = "^.+$"
+			} else {
+				escaped := regexp.QuoteMeta(name)
+				pattern = "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
+			}
 			
 			if val, ok := globalServerNameRegexCache.Load(pattern); ok {
 				c.ServerNamePatterns = append(c.ServerNamePatterns, val.(*regexp.Regexp))
