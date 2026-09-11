@@ -208,7 +208,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		for {
 			mutex.Lock()
 			hs.clientHello, _, err = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
-			if copying || err != nil || hs.c.vers != VersionTLS13 || !config.ServerNames[hs.clientHello.serverName] {
+			if copying || err != nil || hs.c.vers != VersionTLS13 || !config.MatchServerName(hs.clientHello.serverName) {
 				break
 			}
 			var peerPub, peerPub2 []byte
@@ -216,6 +216,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if keyShare.group == X25519MLKEM768 && len(keyShare.data) == mlkem.EncapsulationKeySize768+32 {
 					if peerPub2 != nil {
 						peerPub2 = nil // ensure fail
+						peerPub = nil
 						break // ensure once
 					}
 					peerPub2 = keyShare.data[mlkem.EncapsulationKeySize768:]
@@ -224,17 +225,18 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if keyShare.group == X25519 && len(keyShare.data) == 32 {
 					if peerPub != nil {
 						peerPub2 = nil // ensure fail
+						peerPub = nil
 						break // ensure once
 					}
 					peerPub = keyShare.data
 					break // ensure order
 				}
 			}
-			if peerPub2 == nil {
-				break // reject outdated/strange Client Hello that doesn't have X25519MLKEM768 before optional X25519
-			}
 			if peerPub == nil {
 				peerPub = peerPub2 // secondary choice: X25519 in X25519MLKEM768
+			}
+			if peerPub == nil {
+				break // reject Client Hello that has neither X25519 nor X25519MLKEM768
 			}
 			for peerPub != nil {
 				if hs.c.AuthKey, err = curve25519.X25519(config.PrivateKey, peerPub); err != nil {
@@ -402,18 +404,26 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			if err != nil {
 				break
 			}
+			pollCount := 0
 			for {
-				key := config.Dest + " " + hs.clientHello.serverName
+				matchedPattern := config.GetMatchedPattern(hs.clientHello.serverName)
+				if matchedPattern == "" {
+					matchedPattern = hs.clientHello.serverName
+				}
+				key := config.Dest + " " + matchedPattern + " "
 				if len(hs.clientHello.alpnProtocols) == 0 {
-					key += " 0"
+					key += "0"
 				} else if hs.clientHello.alpnProtocols[0] == "h2" {
-					key += " 2"
+					key += "2"
 				} else {
-					key += " 1"
+					key += "1"
 				}
 				if val, ok := GlobalPostHandshakeRecordsLens.Load(key); ok {
 					if postHandshakeRecordsLens, ok := val.([]int); ok {
 						for _, length := range postHandshakeRecordsLens {
+							if length < 22 {
+								continue
+							}
 							plainText := make([]byte, length-16)
 							plainText[0] = 23
 							plainText[1] = 3
@@ -431,9 +441,13 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 						break
 					}
 				}
-				time.Sleep(5 * time.Second)
+				time.Sleep(100 * time.Millisecond)
 				if maxUseless, ok := GlobalMaxCSSMsgCount.Load(key); ok {
 					hs.c.MaxUselessRecords = maxUseless.(int)
+				}
+				pollCount++
+				if pollCount > 10 {
+					break
 				}
 			}
 			hs.c.isHandshakeComplete.Store(true)
@@ -473,7 +487,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		failureReason = "failed to read client hello"
 	} else if hs.c.vers != VersionTLS13 {
 		failureReason = fmt.Sprintf("unsupported TLS version: %x", hs.c.vers)
-	} else if !config.ServerNames[hs.clientHello.serverName] {
+	} else if !config.MatchServerName(hs.clientHello.serverName) {
 		failureReason = fmt.Sprintf("server name mismatch: %s", hs.clientHello.serverName)
 	} else if hs.c.conn != conn {
 		failureReason = "authentication failed or validation criteria not met"

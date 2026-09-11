@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
@@ -555,7 +556,9 @@ type Config struct {
 	Dest string
 	Xver byte
 
-	ServerNames  map[string]bool
+	ServerNames              map[string]bool
+	ServerNamePatterns       []*regexp.Regexp
+	ServerNamePatternStrings []string
 	PrivateKey   []byte
 	MinClientVer []byte
 	MaxClientVer []byte
@@ -961,6 +964,49 @@ func (c *Config) ticketKeyFromBytes(b [32]byte) (key ticketKey) {
 // ticket, and the lifetime we set for all tickets we send.
 const maxSessionTicketLifetime = 7 * 24 * time.Hour
 
+var globalServerNameRegexCache sync.Map
+
+func (c *Config) CompileServerNamePatterns() {
+	c.ServerNamePatterns = []*regexp.Regexp{}
+	c.ServerNamePatternStrings = []string{}
+	for name := range c.ServerNames {
+		if strings.Contains(name, "*") {
+			var pattern string
+			if name == "*" {
+				pattern = "^.+$"
+			} else {
+				escaped := regexp.QuoteMeta(name)
+				pattern = "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
+			}
+			
+			if val, ok := globalServerNameRegexCache.Load(pattern); ok {
+				c.ServerNamePatterns = append(c.ServerNamePatterns, val.(*regexp.Regexp))
+				c.ServerNamePatternStrings = append(c.ServerNamePatternStrings, name)
+			} else if re, err := regexp.Compile(pattern); err == nil {
+				globalServerNameRegexCache.Store(pattern, re)
+				c.ServerNamePatterns = append(c.ServerNamePatterns, re)
+				c.ServerNamePatternStrings = append(c.ServerNamePatternStrings, name)
+			}
+		}
+	}
+}
+
+func (c *Config) MatchServerName(name string) bool {
+	return c.GetMatchedPattern(name) != ""
+}
+
+func (c *Config) GetMatchedPattern(name string) string {
+	if c.ServerNames[name] {
+		return name
+	}
+	for i, re := range c.ServerNamePatterns {
+		if re.MatchString(name) {
+			return c.ServerNamePatternStrings[i]
+		}
+	}
+	return ""
+}
+
 // Clone returns a shallow clone of c or nil if c is nil. It is safe to clone a [Config] that is
 // being used concurrently by a TLS client or server.
 func (c *Config) Clone() *Config {
@@ -976,6 +1022,8 @@ func (c *Config) Clone() *Config {
 		Dest:                                c.Dest,
 		Xver:                                c.Xver,
 		ServerNames:                         c.ServerNames,
+		ServerNamePatterns:                  c.ServerNamePatterns,
+		ServerNamePatternStrings:            c.ServerNamePatternStrings,
 		PrivateKey:                          c.PrivateKey,
 		MinClientVer:                        c.MinClientVer,
 		MaxClientVer:                        c.MaxClientVer,

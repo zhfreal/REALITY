@@ -2,11 +2,13 @@ package reality
 
 import (
 	"bytes"
+	"crypto/rand"
 	"encoding/binary"
 	"io"
 	"math"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -18,10 +20,66 @@ import (
 var GlobalPostHandshakeRecordsLens sync.Map
 var GlobalMaxCSSMsgCount sync.Map
 
+func GetConcreteDomain(pattern string) string {
+	if !strings.Contains(pattern, "*") {
+		return pattern
+	}
+	// Generate a random 5-character lowercase alphanumeric prefix
+	var rndBytes [5]byte
+	if _, err := rand.Read(rndBytes[:]); err != nil {
+		// Fallback to time-nanosecond pseudo-random bytes if crypto/rand fails
+		seed := uint64(time.Now().UnixNano())
+		for i := range rndBytes {
+			rndBytes[i] = byte(seed >> (i * 8))
+		}
+	}
+	for i, b := range rndBytes {
+		rndBytes[i] = "abcdefghijklmnopqrstuvwxyz0123456789"[b%36]
+	}
+	randomPrefix := string(rndBytes[:])
+
+	if strings.HasPrefix(pattern, "*.") {
+		return randomPrefix + "." + pattern[2:]
+	}
+	return strings.ReplaceAll(pattern, "*", randomPrefix)
+}
+
+func GetProbeSNI(config *Config, pattern string) string {
+	if pattern != "*" {
+		concrete := GetConcreteDomain(pattern)
+		if concrete != "" {
+			return concrete
+		}
+	}
+	// Fallback 1: Use host from config.Dest if it is a valid domain name (not an IP)
+	host, _, err := net.SplitHostPort(config.Dest)
+	if err != nil {
+		host = config.Dest
+	}
+	if net.ParseIP(host) == nil && host != "" {
+		return host
+	}
+	// Fallback 2: Sibling domains (useful when Dest is an IP and pattern is "*")
+	for sn := range config.ServerNames {
+		if sn != "*" {
+			c := GetConcreteDomain(sn)
+			if c != "" {
+				return c
+			}
+		}
+	}
+	return ""
+}
+
 func DetectPostHandshakeRecordsLens(config *Config) {
-	for sni := range config.ServerNames {
+	for pattern := range config.ServerNames {
+		probeSNI := GetProbeSNI(config, pattern)
+		if probeSNI == "" {
+			continue
+		}
 		for alpn := range 3 { // 0, 1, 2
-			key := config.Dest + " " + sni + " " + strconv.Itoa(alpn)
+			alpn := alpn
+			key := config.Dest + " " + pattern + " " + strconv.Itoa(alpn)
 			if _, loaded := GlobalPostHandshakeRecordsLens.LoadOrStore(key, false); !loaded {
 				go func() {
 					defer func() {
@@ -30,7 +88,7 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 							GlobalPostHandshakeRecordsLens.Store(key, []int{})
 						}
 					}()
-					target, err := net.Dial(config.Type, config.Dest)
+					target, err := net.DialTimeout(config.Type, config.Dest, 5*time.Second)
 					if err != nil {
 						return
 					}
@@ -56,16 +114,17 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 						nextProtos = nil
 					}
 					uConn := utls.UClient(detectConn, &utls.Config{
-						ServerName: sni, // needs new loopvar behaviour
+						ServerName: probeSNI,
 						NextProtos: nextProtos,
 					}, fingerprint)
+					uConn.SetDeadline(time.Now().Add(5 * time.Second))
 					if err = uConn.Handshake(); err != nil {
 						return
 					}
 					io.Copy(io.Discard, uConn)
 				}()
 				go func() {
-					target, err := net.Dial(config.Type, config.Dest)
+					target, err := net.DialTimeout(config.Type, config.Dest, 5*time.Second)
 					if err != nil {
 						return
 					}
@@ -91,9 +150,10 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 						Key:  key,
 					}
 					uConn := utls.UClient(conn, &utls.Config{
-						ServerName: sni, // needs new loopvar behaviour
+						ServerName: probeSNI,
 						NextProtos: nextProtos,
 					}, fingerprint)
+					uConn.SetDeadline(time.Now().Add(5 * time.Second))
 					if err = uConn.Handshake(); err != nil {
 						return
 					}
@@ -120,13 +180,12 @@ func (c *PostHandshakeRecordDetectConn) Read(b []byte) (n int, err error) {
 	if !c.CcsSent {
 		return c.Conn.Read(b)
 	}
-	c.Conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	c.Conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 	data, _ := io.ReadAll(c.Conn)
 	var postHandshakeRecordsLens []int
 	for {
 		if len(data) >= 5 && bytes.Equal(data[:3], []byte{23, 3, 3}) {
 			length := int(binary.BigEndian.Uint16(data[3:5])) + 5
-			// illegal dada
 			if length > len(data) {
 				break
 			}
@@ -154,8 +213,8 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 			defer hasAlert.Store(true)
 			buf := make([]byte, 512)
 			for {
-				_, err := c.Conn.Read(buf)
-				if err != nil {
+				_, readErr := c.Conn.Read(buf)
+				if readErr != nil {
 					return
 				}
 				if buf[0] == 0x15 {
