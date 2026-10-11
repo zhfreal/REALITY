@@ -232,11 +232,11 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					break // ensure order
 				}
 			}
-			if peerPub == nil {
-				peerPub = peerPub2 // secondary choice: X25519 in X25519MLKEM768
+			if peerPub2 == nil {
+				break // reject outdated/strange Client Hello that doesn't have X25519MLKEM768 before optional X25519
 			}
 			if peerPub == nil {
-				break // reject Client Hello that has neither X25519 nor X25519MLKEM768
+				peerPub = peerPub2 // secondary choice: X25519 in X25519MLKEM768
 			}
 			for peerPub != nil {
 				if hs.c.AuthKey, err = curve25519.X25519(config.PrivateKey, peerPub); err != nil {
