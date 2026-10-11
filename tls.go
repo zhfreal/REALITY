@@ -205,12 +205,9 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	waitGroup.Add(2)
 
 	go func() {
-		for {
-			mutex.Lock()
-			hs.clientHello, _, err = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
-			if copying || err != nil || hs.c.vers != VersionTLS13 || !config.MatchServerName(hs.clientHello.serverName) {
-				break
-			}
+		mutex.Lock()
+		hs.clientHello, _, err = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
+		if !(copying || err != nil || hs.c.vers != VersionTLS13 || !config.MatchServerName(hs.clientHello.serverName)) {
 			var peerPub, peerPub2 []byte
 			for _, keyShare := range hs.clientHello.keyShares {
 				if keyShare.group == X25519MLKEM768 && len(keyShare.data) == mlkem.EncapsulationKeySize768+32 {
@@ -223,61 +220,55 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					continue // fast continue
 				}
 				if keyShare.group == X25519 && len(keyShare.data) == 32 {
-					if peerPub != nil {
+					if peerPub != nil || peerPub2 == nil {
 						peerPub2 = nil // ensure fail
 						peerPub = nil
-						break // ensure once
+						break // ensure once & order
 					}
 					peerPub = keyShare.data
-					break // ensure order
+					continue // fast continue
 				}
 			}
-			if peerPub2 == nil {
-				break // reject outdated/strange Client Hello that doesn't have X25519MLKEM768 before optional X25519
-			}
-			if peerPub == nil {
-				peerPub = peerPub2 // secondary choice: X25519 in X25519MLKEM768
-			}
-			for peerPub != nil {
-				if hs.c.AuthKey, err = curve25519.X25519(config.PrivateKey, peerPub); err != nil {
-					break
+			if peerPub2 != nil {
+				if peerPub == nil {
+					peerPub = peerPub2 // secondary choice: X25519 in X25519MLKEM768
 				}
-				if _, err = hkdf.New(sha256.New, hs.c.AuthKey, hs.clientHello.random[:20], []byte("REALITY")).Read(hs.c.AuthKey); err != nil {
-					break
+				if peerPub != nil {
+					if hs.c.AuthKey, err = curve25519.X25519(config.PrivateKey, peerPub); err == nil {
+						if _, err = hkdf.New(sha256.New, hs.c.AuthKey, hs.clientHello.random[:20], []byte("REALITY")).Read(hs.c.AuthKey); err == nil {
+							block, _ := aes.NewCipher(hs.c.AuthKey)
+							aead, _ := cipher.NewGCM(block)
+							if config.Show {
+								fmt.Printf("REALITY remoteAddr: %v\ths.c.AuthKey[:16]: %v\tAEAD: %T\n", remoteAddr, hs.c.AuthKey[:16], aead)
+							}
+							ciphertext := make([]byte, 32)
+							plainText := make([]byte, 32)
+							copy(ciphertext, hs.clientHello.sessionId)
+							copy(hs.clientHello.sessionId, plainText) // hs.clientHello.sessionId points to hs.clientHello.raw[39:]
+							if _, err = aead.Open(plainText[:0], hs.clientHello.random[20:], ciphertext, hs.clientHello.original); err == nil {
+								copy(hs.clientHello.sessionId, ciphertext)
+								copy(hs.c.ClientVer[:], plainText)
+								hs.c.ClientTime = time.Unix(int64(binary.BigEndian.Uint32(plainText[4:])), 0)
+								copy(hs.c.ClientShortId[:], plainText[8:])
+								if config.Show {
+									fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientVer: %v\n", remoteAddr, hs.c.ClientVer)
+									fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientTime: %v\n", remoteAddr, hs.c.ClientTime)
+									fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientShortId: %v\n", remoteAddr, hs.c.ClientShortId)
+								}
+								if (config.MinClientVer == nil || Value(hs.c.ClientVer[:]...) >= Value(config.MinClientVer...)) &&
+									(config.MaxClientVer == nil || Value(hs.c.ClientVer[:]...) <= Value(config.MaxClientVer...)) &&
+									(config.MaxTimeDiff == 0 || time.Since(hs.c.ClientTime).Abs() <= config.MaxTimeDiff) &&
+									(config.ShortIds[hs.c.ClientShortId]) {
+									hs.c.conn = conn
+								}
+							}
+						}
+					}
 				}
-				block, _ := aes.NewCipher(hs.c.AuthKey)
-				aead, _ := cipher.NewGCM(block)
-				if config.Show {
-					fmt.Printf("REALITY remoteAddr: %v\ths.c.AuthKey[:16]: %v\tAEAD: %T\n", remoteAddr, hs.c.AuthKey[:16], aead)
-				}
-				ciphertext := make([]byte, 32)
-				plainText := make([]byte, 32)
-				copy(ciphertext, hs.clientHello.sessionId)
-				copy(hs.clientHello.sessionId, plainText) // hs.clientHello.sessionId points to hs.clientHello.raw[39:]
-				if _, err = aead.Open(plainText[:0], hs.clientHello.random[20:], ciphertext, hs.clientHello.original); err != nil {
-					break
-				}
-				copy(hs.clientHello.sessionId, ciphertext)
-				copy(hs.c.ClientVer[:], plainText)
-				hs.c.ClientTime = time.Unix(int64(binary.BigEndian.Uint32(plainText[4:])), 0)
-				copy(hs.c.ClientShortId[:], plainText[8:])
-				if config.Show {
-					fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientVer: %v\n", remoteAddr, hs.c.ClientVer)
-					fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientTime: %v\n", remoteAddr, hs.c.ClientTime)
-					fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientShortId: %v\n", remoteAddr, hs.c.ClientShortId)
-				}
-				if (config.MinClientVer == nil || Value(hs.c.ClientVer[:]...) >= Value(config.MinClientVer...)) &&
-					(config.MaxClientVer == nil || Value(hs.c.ClientVer[:]...) <= Value(config.MaxClientVer...)) &&
-					(config.MaxTimeDiff == 0 || time.Since(hs.c.ClientTime).Abs() <= config.MaxTimeDiff) &&
-					(config.ShortIds[hs.c.ClientShortId]) {
-					hs.c.conn = conn
-				}
-				break
 			}
 			if config.Show {
 				fmt.Printf("REALITY remoteAddr: %v\ths.c.conn == conn: %v\n", remoteAddr, hs.c.conn == conn)
 			}
-			break
 		}
 		mutex.Unlock()
 		if hs.c.conn != conn {
