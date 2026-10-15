@@ -45,21 +45,36 @@ func GetConcreteDomain(pattern string) string {
 }
 
 func GetProbeSNI(config *Config, pattern string) string {
-	if pattern != "*" {
-		concrete := GetConcreteDomain(pattern)
-		if concrete != "" {
-			return concrete
-		}
+	if pattern != "" && !strings.Contains(pattern, "*") {
+		return pattern
 	}
-	// Fallback 1: Use host from config.Dest if it is a valid domain name (not an IP)
+	// Prefer host from config.Dest when it is a valid domain name (not an IP),
+	// so active probes present a real hostname covered by the target's certificate
+	// rather than a random synthesized subdomain that may fail TLS verification.
 	host, _, err := net.SplitHostPort(config.Dest)
 	if err != nil {
 		host = config.Dest
 	}
 	if net.ParseIP(host) == nil && host != "" {
+		if pattern == "" || pattern == "*" || config.MatchServerName(host) {
+			return host
+		}
+	}
+	if pattern != "" && pattern != "*" {
+		concrete := GetConcreteDomain(pattern)
+		if concrete != "" {
+			return concrete
+		}
+	}
+	if net.ParseIP(host) == nil && host != "" {
 		return host
 	}
-	// Fallback 2: Sibling domains (useful when Dest is an IP and pattern is "*")
+	// Fallback: Concrete sibling domain before wildcard synthesis (useful when Dest is an IP and pattern is "*")
+	for sn := range config.ServerNames {
+		if sn != "" && !strings.Contains(sn, "*") {
+			return sn
+		}
+	}
 	for sn := range config.ServerNames {
 		if sn != "*" {
 			c := GetConcreteDomain(sn)
@@ -71,21 +86,59 @@ func GetProbeSNI(config *Config, pattern string) string {
 	return ""
 }
 
+func storeRecordsLensForKeys(keys []string, val any) {
+	for _, k := range keys {
+		GlobalPostHandshakeRecordsLens.Store(k, val)
+	}
+}
+
+func storeMaxCCSForKeys(keys []string, val any) {
+	for _, k := range keys {
+		GlobalMaxCSSMsgCount.Store(k, val)
+	}
+}
+
 func DetectPostHandshakeRecordsLens(config *Config) {
+	config.CompileServerNamePatterns()
+	sniToPatterns := make(map[string][]string)
 	for pattern := range config.ServerNames {
 		probeSNI := GetProbeSNI(config, pattern)
 		if probeSNI == "" {
 			continue
 		}
+		sniToPatterns[probeSNI] = append(sniToPatterns[probeSNI], pattern)
+	}
+
+	for probeSNI, patterns := range sniToPatterns {
+		probeSNI := probeSNI
+		patterns := patterns
 		for alpn := range 3 { // 0, 1, 2
 			alpn := alpn
-			key := config.Dest + " " + pattern + " " + strconv.Itoa(alpn)
-			if _, loaded := GlobalPostHandshakeRecordsLens.LoadOrStore(key, false); !loaded {
+			alpnStr := strconv.Itoa(alpn)
+			probeKey := config.Dest + " " + probeSNI + " " + alpnStr
+			keys := make([]string, 0, len(patterns)+1)
+			keys = append(keys, probeKey)
+			for _, p := range patterns {
+				pk := config.Dest + " " + p + " " + alpnStr
+				if pk != probeKey {
+					keys = append(keys, pk)
+				}
+			}
+
+			alreadyLoaded := true
+			for _, k := range keys {
+				if _, loaded := GlobalPostHandshakeRecordsLens.LoadOrStore(k, false); !loaded {
+					alreadyLoaded = false
+				}
+			}
+			if !alreadyLoaded {
 				go func() {
 					defer func() {
-						val, _ := GlobalPostHandshakeRecordsLens.Load(key)
-						if _, ok := val.(bool); ok {
-							GlobalPostHandshakeRecordsLens.Store(key, []int{})
+						for _, k := range keys {
+							val, _ := GlobalPostHandshakeRecordsLens.Load(k)
+							if _, ok := val.(bool); ok {
+								GlobalPostHandshakeRecordsLens.Store(k, []int{})
+							}
 						}
 					}()
 					target, err := net.DialTimeout(config.Type, config.Dest, 5*time.Second)
@@ -100,7 +153,8 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 					}
 					detectConn := &PostHandshakeRecordDetectConn{
 						Conn: target,
-						Key:  key,
+						Key:  probeKey,
+						Keys: keys,
 					}
 					fingerprint := utls.HelloChrome_Auto
 					nextProtos := []string{"h2", "http/1.1"}
@@ -147,7 +201,8 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 					}
 					conn := &CCSDetectConn{
 						Conn: target,
-						Key:  key,
+						Key:  probeKey,
+						Keys: keys,
 					}
 					uConn := utls.UClient(conn, &utls.Config{
 						ServerName: probeSNI,
@@ -166,7 +221,16 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 type PostHandshakeRecordDetectConn struct {
 	net.Conn
 	Key     string
+	Keys    []string
 	CcsSent bool
+}
+
+func (c *PostHandshakeRecordDetectConn) storeResult(lens []int) {
+	if len(c.Keys) > 0 {
+		storeRecordsLensForKeys(c.Keys, lens)
+	} else if c.Key != "" {
+		GlobalPostHandshakeRecordsLens.Store(c.Key, lens)
+	}
 }
 
 func (c *PostHandshakeRecordDetectConn) Write(b []byte) (n int, err error) {
@@ -195,7 +259,7 @@ func (c *PostHandshakeRecordDetectConn) Read(b []byte) (n int, err error) {
 			break
 		}
 	}
-	GlobalPostHandshakeRecordsLens.Store(c.Key, postHandshakeRecordsLens)
+	c.storeResult(postHandshakeRecordsLens)
 	return 0, io.EOF
 }
 
@@ -203,7 +267,16 @@ var CCSMsg = []byte{0x14, 0x3, 0x3, 0x0, 0x1, 0x1}
 
 type CCSDetectConn struct {
 	net.Conn
-	Key string
+	Key  string
+	Keys []string
+}
+
+func (c *CCSDetectConn) storeResult(maxCount int) {
+	if len(c.Keys) > 0 {
+		storeMaxCCSForKeys(c.Keys, maxCount)
+	} else if c.Key != "" {
+		GlobalMaxCSSMsgCount.Store(c.Key, maxCount)
+	}
 }
 
 func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
@@ -232,18 +305,18 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 			return false
 		}
 		if sendProbePayload(2) {
-			GlobalMaxCSSMsgCount.Store(c.Key, 1)
+			c.storeResult(1)
 			return c.Conn.Write(b)
 		}
 		if sendProbePayload(15) {
-			GlobalMaxCSSMsgCount.Store(c.Key, 16)
+			c.storeResult(16)
 			return c.Conn.Write(b)
 		}
 		if sendProbePayload(16) {
-			GlobalMaxCSSMsgCount.Store(c.Key, 32)
+			c.storeResult(32)
 			return c.Conn.Write(b)
 		}
-		GlobalMaxCSSMsgCount.Store(c.Key, math.MaxInt)
+		c.storeResult(math.MaxInt)
 		return c.Conn.Write(b)
 	}
 	return c.Conn.Write(b)

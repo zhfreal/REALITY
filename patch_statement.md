@@ -65,4 +65,12 @@ This document details the modifications applied to the custom `reality` module r
 * **Wildcard `*` Global Regex Fix (`common.go`)**: Fixed `CompileServerNamePatterns` so that `"*"` compiles to `^.+$` (matching multi-level domain names) instead of `^[^.]+$` (which only matched dotless hostnames).
 * **Slice Bounds & Polling Ceiling Fix (`tls.go`)**: Added a `length >= 22` check before slicing `make([]byte, length-16)` in `tls.go` to prevent negative-size slice panics. Added a 10-iteration ceiling to the post-handshake record polling loop to ensure connections do not block indefinitely if background probes fail.
 
+---
 
+## Post-Review Fixes & Design Improvements
+
+1. **Active Probing Deduplication & Hostname-First `GetProbeSNI` (`record_detect.go`)**:
+   - Deduplicated active post-handshake and CCS probes in `DetectPostHandshakeRecordsLens` by `(config.Dest, probeSNI, alpn)` and fanned out probe results across all matching `config.ServerNames` pattern cache keys.
+   - Prioritized `config.Dest`'s domain hostname in `GetProbeSNI` when `pattern` is a wildcard (`*.example.com` or `*`), preventing TLS certificate verification failures against single-domain targets that reject synthesized random subdomains.
+2. **First-Iteration Cache-Hit `GlobalMaxCSSMsgCount` Loading (`tls.go`)**:
+   - Moved `GlobalMaxCSSMsgCount.Load(key)` before the `GlobalPostHandshakeRecordsLens` cache-hit `break` so `hs.c.MaxUselessRecords` is always populated even when `GlobalPostHandshakeRecordsLens` hits on `pollCount == 0`.

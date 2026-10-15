@@ -395,19 +395,22 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			if err != nil {
 				break
 			}
+			matchedPattern := config.GetMatchedPattern(hs.clientHello.serverName)
+			if matchedPattern == "" {
+				matchedPattern = hs.clientHello.serverName
+			}
+			key := config.Dest + " " + matchedPattern + " "
+			if len(hs.clientHello.alpnProtocols) == 0 {
+				key += "0"
+			} else if hs.clientHello.alpnProtocols[0] == "h2" {
+				key += "2"
+			} else {
+				key += "1"
+			}
 			pollCount := 0
 			for {
-				matchedPattern := config.GetMatchedPattern(hs.clientHello.serverName)
-				if matchedPattern == "" {
-					matchedPattern = hs.clientHello.serverName
-				}
-				key := config.Dest + " " + matchedPattern + " "
-				if len(hs.clientHello.alpnProtocols) == 0 {
-					key += "0"
-				} else if hs.clientHello.alpnProtocols[0] == "h2" {
-					key += "2"
-				} else {
-					key += "1"
+				if maxUseless, ok := GlobalMaxCSSMsgCount.Load(key); ok {
+					hs.c.MaxUselessRecords = maxUseless.(int)
 				}
 				if val, ok := GlobalPostHandshakeRecordsLens.Load(key); ok {
 					if postHandshakeRecordsLens, ok := val.([]int); ok {

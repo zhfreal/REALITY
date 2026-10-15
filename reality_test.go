@@ -38,3 +38,21 @@ func TestGetConcreteDomain(t *testing.T) {
 		t.Fatalf("GetConcreteDomain returned unexpected: %s", d)
 	}
 }
+
+func TestGetProbeSNI(t *testing.T) {
+	cfg := &Config{
+		Dest: "www.example.com:443",
+		ServerNames: map[string]bool{
+			"*.example.com": true,
+			"*":             true,
+		},
+	}
+	cfg.CompileServerNamePatterns()
+
+	if got := GetProbeSNI(cfg, "*.example.com"); got != "www.example.com" {
+		t.Fatalf("GetProbeSNI(*.example.com) = %q, want www.example.com", got)
+	}
+	if got := GetProbeSNI(cfg, "*"); got != "www.example.com" {
+		t.Fatalf("GetProbeSNI(*) = %q, want www.example.com", got)
+	}
+}
