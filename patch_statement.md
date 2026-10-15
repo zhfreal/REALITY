@@ -74,3 +74,28 @@ This document details the modifications applied to the custom `reality` module r
    - Prioritized `config.Dest`'s domain hostname in `GetProbeSNI` when `pattern` is a wildcard (`*.example.com` or `*`), preventing TLS certificate verification failures against single-domain targets that reject synthesized random subdomains.
 2. **First-Iteration Cache-Hit `GlobalMaxCSSMsgCount` Loading (`tls.go`)**:
    - Moved `GlobalMaxCSSMsgCount.Load(key)` before the `GlobalPostHandshakeRecordsLens` cache-hit `break` so `hs.c.MaxUselessRecords` is always populated even when `GlobalPostHandshakeRecordsLens` hits on `pollCount == 0`.
+
+
+---
+
+## 5. Additional Post-Review Bug Fixes & Hardening
+
+1. **Thread-Safe & Lazy Wildcard Pattern Compilation (`common.go`)**:
+   - Protected `CompileServerNamePatterns()` and `GetMatchedPattern()` with `Config.mutex` (`sync.RWMutex`) to eliminate the data race between background `go reality.DetectPostHandshakeRecordsLens(config)` and concurrent `Server()` handshakes.
+   - Added lazy compilation inside `GetMatchedPattern()` when `ServerNamePatterns == nil && len(ServerNames) > 0`, ensuring callers that do not explicitly invoke `CompileServerNamePatterns()` before `Server()` still evaluate wildcard SNIs properly.
+   - Filtered out disabled `ServerNames` entries (`!enabled`) and sorted wildcard patterns deterministically by specificity (placing specific patterns like `*.sub.example.com` and `*.example.com` before catch-all `*`) and rejected empty SNI (`""`) against `*`.
+2. **Active Probe SNI Selection & Sibling Fallback (`record_detect.go`)**:
+   - Fixed unreachable fallback code in `GetProbeSNI` where `pattern != "*"` unconditionally synthesized a random 5-character subdomain before checking concrete sibling entries in `ServerNames` when `config.Dest` is an IP literal.
+   - `GetProbeSNI` now prioritizes matching enabled concrete sibling domains in `ServerNames` before falling back to random subdomain synthesis, and `DetectPostHandshakeRecordsLens` skips disabled `ServerNames` entries (`!enabled`).
+
+
+### 10. Elimination of Unverified `InsecureSkipVerify` (`handshake_client.go`)
+- Updated `verifyServerCertificate` in `handshake_client.go` to reject `InsecureSkipVerify == true` whenever both `VerifyPeerCertificate == nil` and `VerifyConnection == nil` (`tls: InsecureSkipVerify is disabled; must use VerifyPeerCertificate or VerifyConnection to verify peer certificates`), without adding duplicate configuration fields to `reality.Config`.
+
+
+## Five-Round Code Review & Remediation Addendum (2026-10-15)
+
+- **Round 1 (Cryptography & TLS Handshake Lifecycle)**:
+  - `tls.go` (`NewListener`): Fixed loop-variable data race on `c, err` inside the spawned handshake goroutine by passing `c` as an explicit goroutine parameter, and closed `tlsConn` if `l.conns` is closed (`<-l.closed`) before channel delivery.
+  - `record_detect.go` (`CCSDetectConn.Write`): Guarded CCS probe execution with `ccsOnce sync.Once` so multiple early writes cannot spawn duplicate background reader goroutines on `c.Conn`.
+  - `handshake_client.go`: Enforced peer certificate verification (`InsecureSkipVerify` rejected unless `VerifyPeerCertificate` or `VerifyConnection` is provided).

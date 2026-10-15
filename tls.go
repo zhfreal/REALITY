@@ -553,19 +553,25 @@ func NewListener(inner net.Listener, config *Config) net.Listener {
 		l.conns = make(chan net.Conn)
 		go func() {
 			for {
-				c, err := l.Listener.Accept()
-				if err != nil {
-					l.err = err
+				rawConn, acceptErr := l.Listener.Accept()
+				if acceptErr != nil {
+					l.err = acceptErr
 					close(l.conns)
 					return
 				}
-				go func() {
-					defer func() { recover() }()
-					c, err = Server(context.Background(), c, l.config)
-					if err == nil {
-						l.conns <- c
+				go func(conn net.Conn) {
+					var tlsConn net.Conn
+					defer func() {
+						if r := recover(); r != nil && tlsConn != nil {
+							_ = tlsConn.Close()
+						}
+					}()
+					var hsErr error
+					tlsConn, hsErr = Server(context.Background(), conn, l.config)
+					if hsErr == nil {
+						l.conns <- tlsConn
 					}
-				}()
+				}(rawConn)
 			}
 		}()
 	}

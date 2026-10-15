@@ -7,6 +7,7 @@ import (
 	"io"
 	"math"
 	"net"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -48,6 +49,12 @@ func GetProbeSNI(config *Config, pattern string) string {
 	if pattern != "" && !strings.Contains(pattern, "*") {
 		return pattern
 	}
+	if config == nil {
+		if pattern != "" && pattern != "*" {
+			return GetConcreteDomain(pattern)
+		}
+		return ""
+	}
 	// Prefer host from config.Dest when it is a valid domain name (not an IP),
 	// so active probes present a real hostname covered by the target's certificate
 	// rather than a random synthesized subdomain that may fail TLS verification.
@@ -56,11 +63,25 @@ func GetProbeSNI(config *Config, pattern string) string {
 		host = config.Dest
 	}
 	if net.ParseIP(host) == nil && host != "" {
-		if pattern == "" || pattern == "*" || config.MatchServerName(host) {
+		if pattern == "" || pattern == "*" || matchWildcardPattern(pattern, host) || config.MatchServerName(host) {
 			return host
 		}
 	}
+	// Collect enabled concrete sibling domains in deterministic order.
+	var concreteSiblings []string
+	for sn, enabled := range config.ServerNames {
+		if enabled && sn != "" && !strings.Contains(sn, "*") {
+			concreteSiblings = append(concreteSiblings, sn)
+		}
+	}
+	slices.Sort(concreteSiblings)
+
 	if pattern != "" && pattern != "*" {
+		for _, sn := range concreteSiblings {
+			if matchWildcardPattern(pattern, sn) {
+				return sn
+			}
+		}
 		concrete := GetConcreteDomain(pattern)
 		if concrete != "" {
 			return concrete
@@ -70,17 +91,20 @@ func GetProbeSNI(config *Config, pattern string) string {
 		return host
 	}
 	// Fallback: Concrete sibling domain before wildcard synthesis (useful when Dest is an IP and pattern is "*")
-	for sn := range config.ServerNames {
-		if sn != "" && !strings.Contains(sn, "*") {
-			return sn
+	if len(concreteSiblings) > 0 {
+		return concreteSiblings[0]
+	}
+	var wildcardSiblings []string
+	for sn, enabled := range config.ServerNames {
+		if enabled && sn != "" && sn != "*" && strings.Contains(sn, "*") {
+			wildcardSiblings = append(wildcardSiblings, sn)
 		}
 	}
-	for sn := range config.ServerNames {
-		if sn != "*" {
-			c := GetConcreteDomain(sn)
-			if c != "" {
-				return c
-			}
+	slices.Sort(wildcardSiblings)
+	for _, sn := range wildcardSiblings {
+		c := GetConcreteDomain(sn)
+		if c != "" {
+			return c
 		}
 	}
 	return ""
@@ -99,9 +123,15 @@ func storeMaxCCSForKeys(keys []string, val any) {
 }
 
 func DetectPostHandshakeRecordsLens(config *Config) {
+	if config == nil {
+		return
+	}
 	config.CompileServerNamePatterns()
 	sniToPatterns := make(map[string][]string)
-	for pattern := range config.ServerNames {
+	for pattern, enabled := range config.ServerNames {
+		if !enabled {
+			continue
+		}
 		probeSNI := GetProbeSNI(config, pattern)
 		if probeSNI == "" {
 			continue
@@ -267,8 +297,9 @@ var CCSMsg = []byte{0x14, 0x3, 0x3, 0x0, 0x1, 0x1}
 
 type CCSDetectConn struct {
 	net.Conn
-	Key  string
-	Keys []string
+	Key     string
+	Keys    []string
+	ccsOnce sync.Once
 }
 
 func (c *CCSDetectConn) storeResult(maxCount int) {
@@ -281,6 +312,11 @@ func (c *CCSDetectConn) storeResult(maxCount int) {
 
 func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 	if len(b) >= 3 && bytes.Equal(b[:3], []byte{20, 3, 3}) {
+		ran := false
+		c.ccsOnce.Do(func() { ran = true })
+		if !ran {
+			return c.Conn.Write(b)
+		}
 		var hasAlert atomic.Bool
 		go func() {
 			defer hasAlert.Store(true)

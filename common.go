@@ -966,29 +966,81 @@ const maxSessionTicketLifetime = 7 * 24 * time.Hour
 
 var globalServerNameRegexCache sync.Map
 
+func compileWildcardRegexp(name string) (*regexp.Regexp, bool) {
+	var pattern string
+	if name == "*" {
+		pattern = "^.+$"
+	} else {
+		escaped := regexp.QuoteMeta(name)
+		pattern = "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
+	}
+	if val, ok := globalServerNameRegexCache.Load(pattern); ok {
+		return val.(*regexp.Regexp), true
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, false
+	}
+	globalServerNameRegexCache.Store(pattern, re)
+	return re, true
+}
+
+func matchWildcardPattern(pattern, domain string) bool {
+	if domain == "" {
+		return false
+	}
+	if pattern == domain {
+		return true
+	}
+	if !strings.Contains(pattern, "*") {
+		return false
+	}
+	if re, ok := compileWildcardRegexp(pattern); ok {
+		return re.MatchString(domain)
+	}
+	return false
+}
+
 func (c *Config) CompileServerNamePatterns() {
-	c.ServerNamePatterns = []*regexp.Regexp{}
-	c.ServerNamePatternStrings = []string{}
-	for name := range c.ServerNames {
-		if strings.Contains(name, "*") {
-			var pattern string
-			if name == "*" {
-				pattern = "^.+$"
-			} else {
-				escaped := regexp.QuoteMeta(name)
-				pattern = "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
-			}
-			
-			if val, ok := globalServerNameRegexCache.Load(pattern); ok {
-				c.ServerNamePatterns = append(c.ServerNamePatterns, val.(*regexp.Regexp))
-				c.ServerNamePatternStrings = append(c.ServerNamePatternStrings, name)
-			} else if re, err := regexp.Compile(pattern); err == nil {
-				globalServerNameRegexCache.Store(pattern, re)
-				c.ServerNamePatterns = append(c.ServerNamePatterns, re)
-				c.ServerNamePatternStrings = append(c.ServerNamePatternStrings, name)
-			}
+	if c == nil {
+		return
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.compileServerNamePatternsLocked()
+}
+
+func (c *Config) compileServerNamePatternsLocked() {
+	wildcards := make([]string, 0, len(c.ServerNames))
+	for name, enabled := range c.ServerNames {
+		if !enabled || !strings.Contains(name, "*") {
+			continue
+		}
+		wildcards = append(wildcards, name)
+	}
+	// Sort specific wildcard patterns before catch-all "*", then by descending length and lexicographically.
+	slices.SortFunc(wildcards, func(a, b string) int {
+		if a == "*" && b != "*" {
+			return 1
+		}
+		if a != "*" && b == "*" {
+			return -1
+		}
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	patterns := make([]*regexp.Regexp, 0, len(wildcards))
+	patternStrings := make([]string, 0, len(wildcards))
+	for _, name := range wildcards {
+		if re, ok := compileWildcardRegexp(name); ok {
+			patterns = append(patterns, re)
+			patternStrings = append(patternStrings, name)
 		}
 	}
+	c.ServerNamePatterns = patterns
+	c.ServerNamePatternStrings = patternStrings
 }
 
 func (c *Config) MatchServerName(name string) bool {
@@ -996,12 +1048,33 @@ func (c *Config) MatchServerName(name string) bool {
 }
 
 func (c *Config) GetMatchedPattern(name string) string {
+	if c == nil {
+		return ""
+	}
 	if c.ServerNames[name] {
 		return name
 	}
-	for i, re := range c.ServerNamePatterns {
+	if name == "" {
+		return ""
+	}
+	c.mutex.RLock()
+	patterns := c.ServerNamePatterns
+	patternStrings := c.ServerNamePatternStrings
+	c.mutex.RUnlock()
+
+	if patterns == nil && len(c.ServerNames) > 0 {
+		c.mutex.Lock()
+		if c.ServerNamePatterns == nil {
+			c.compileServerNamePatternsLocked()
+		}
+		patterns = c.ServerNamePatterns
+		patternStrings = c.ServerNamePatternStrings
+		c.mutex.Unlock()
+	}
+
+	for i, re := range patterns {
 		if re.MatchString(name) {
-			return c.ServerNamePatternStrings[i]
+			return patternStrings[i]
 		}
 	}
 	return ""
