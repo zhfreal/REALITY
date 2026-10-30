@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
+	"regexp"
 	"runtime"
 	"slices"
 	"strings"
@@ -593,8 +595,10 @@ type Config struct {
 	Dest string
 	Xver byte
 
-	ServerNames  map[string]bool
-	PrivateKey   *ecdh.PrivateKey
+	ServerNames              map[string]bool
+	ServerNamePatterns       []*regexp.Regexp
+	ServerNamePatternStrings []string
+	PrivateKey               *ecdh.PrivateKey
 	MinClientVer []byte
 	MaxClientVer []byte
 	MaxTimeDiff  time.Duration
@@ -604,6 +608,9 @@ type Config struct {
 
 	LimitFallbackUpload   LimitFallback
 	LimitFallbackDownload LimitFallback
+
+	ProbeTimeout         time.Duration
+	MaxPostHandshakeWait time.Duration
 	// [REALITY] SECTION END
 
 	// Rand provides the source of entropy for the connection.
@@ -1028,6 +1035,142 @@ func (c *Config) ticketKeyFromBytes(b [32]byte) (key ticketKey) {
 // ticket, and the lifetime we set for all tickets we send.
 const maxSessionTicketLifetime = 7 * 24 * time.Hour
 
+const (
+	DefaultProbeTimeout             = 5 * time.Second
+	DefaultDetectReadDeadline       = 1 * time.Second
+	DefaultPostHandshakeWaitTimeout = 5 * time.Second
+	PostHandshakePollInterval       = 500 * time.Millisecond
+	MaxPostHandshakeWaitAttempts    = 10
+	RecordMinAEADTagLen             = 16
+	RecordHeaderLen                 = 5
+	RecordMinEncryptedLen           = RecordHeaderLen + RecordMinAEADTagLen // 21
+	Mldsa65CertSignatureOffset      = 126
+	DefaultRandomSubdomainLen       = 5
+	MaxDetectRecordBufferSize       = 64 * 1024
+	AlertInspectionBufferSize       = 512
+	RecordTypeChangeCipherSpec      = 0x14
+	RecordTypeAlert                 = 0x15
+	RecordTypeHandshake             = 0x16
+	RecordTypeApplicationData       = 0x17
+	TLS12RecordVersionMajor         = 3
+	TLS12RecordVersionMinor         = 3
+)
+
+var globalServerNameRegexCache sync.Map
+
+func compileWildcardRegexp(name string) (*regexp.Regexp, bool) {
+	var pattern string
+	if name == "*" {
+		pattern = "^.+$"
+	} else {
+		escaped := regexp.QuoteMeta(name)
+		pattern = "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
+	}
+	if val, ok := globalServerNameRegexCache.Load(pattern); ok {
+		return val.(*regexp.Regexp), true
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, false
+	}
+	globalServerNameRegexCache.Store(pattern, re)
+	return re, true
+}
+
+func matchWildcardPattern(pattern, domain string) bool {
+	if domain == "" {
+		return false
+	}
+	if pattern == domain {
+		return true
+	}
+	if !strings.Contains(pattern, "*") {
+		return false
+	}
+	if re, ok := compileWildcardRegexp(pattern); ok {
+		return re.MatchString(domain)
+	}
+	return false
+}
+
+func (c *Config) CompileServerNamePatterns() {
+	if c == nil {
+		return
+	}
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
+	c.compileServerNamePatternsLocked()
+}
+
+func (c *Config) compileServerNamePatternsLocked() {
+	wildcards := make([]string, 0, len(c.ServerNames))
+	for name, enabled := range c.ServerNames {
+		if !enabled || !strings.Contains(name, "*") {
+			continue
+		}
+		wildcards = append(wildcards, name)
+	}
+	// Sort specific wildcard patterns before catch-all "*", then by descending length and lexicographically.
+	slices.SortFunc(wildcards, func(a, b string) int {
+		if a == "*" && b != "*" {
+			return 1
+		}
+		if a != "*" && b == "*" {
+			return -1
+		}
+		if len(a) != len(b) {
+			return len(b) - len(a)
+		}
+		return strings.Compare(a, b)
+	})
+	patterns := make([]*regexp.Regexp, 0, len(wildcards))
+	patternStrings := make([]string, 0, len(wildcards))
+	for _, name := range wildcards {
+		if re, ok := compileWildcardRegexp(name); ok {
+			patterns = append(patterns, re)
+			patternStrings = append(patternStrings, name)
+		}
+	}
+	c.ServerNamePatterns = patterns
+	c.ServerNamePatternStrings = patternStrings
+}
+
+func (c *Config) MatchServerName(name string) bool {
+	return c.GetMatchedPattern(name) != ""
+}
+
+func (c *Config) GetMatchedPattern(name string) string {
+	if c == nil || name == "" {
+		return ""
+	}
+	c.mutex.RLock()
+	if c.ServerNames[name] {
+		c.mutex.RUnlock()
+		return name
+	}
+	patterns := c.ServerNamePatterns
+	patternStrings := c.ServerNamePatternStrings
+	needCompile := patterns == nil && len(c.ServerNames) > 0
+	c.mutex.RUnlock()
+
+	if needCompile {
+		c.mutex.Lock()
+		if c.ServerNamePatterns == nil {
+			c.compileServerNamePatternsLocked()
+		}
+		patterns = c.ServerNamePatterns
+		patternStrings = c.ServerNamePatternStrings
+		c.mutex.Unlock()
+	}
+
+	for i, re := range patterns {
+		if re.MatchString(name) {
+			return patternStrings[i]
+		}
+	}
+	return ""
+}
+
 // Clone returns a shallow clone of c or nil if c is nil. It is safe to clone a
 // [Config] that is being used concurrently by a TLS client or server.
 //
@@ -1045,20 +1188,24 @@ func (c *Config) Clone() *Config {
 	defer c.mutex.RUnlock()
 	return &Config{
 		// [REALITY] SECTION: define var
-		DialContext:           c.DialContext,
-		Show:                  c.Show,
-		Type:                  c.Type,
-		Dest:                  c.Dest,
-		Xver:                  c.Xver,
-		ServerNames:           c.ServerNames,
-		PrivateKey:            c.PrivateKey,
-		MinClientVer:          c.MinClientVer,
-		MaxClientVer:          c.MaxClientVer,
-		MaxTimeDiff:           c.MaxTimeDiff,
-		ShortIds:              c.ShortIds,
-		Mldsa65Key:            c.Mldsa65Key,
-		LimitFallbackUpload:   c.LimitFallbackUpload,
-		LimitFallbackDownload: c.LimitFallbackDownload,
+		DialContext:              c.DialContext,
+		Show:                     c.Show,
+		Type:                     c.Type,
+		Dest:                     c.Dest,
+		Xver:                     c.Xver,
+		ServerNames:              maps.Clone(c.ServerNames),
+		ServerNamePatterns:       slices.Clone(c.ServerNamePatterns),
+		ServerNamePatternStrings: slices.Clone(c.ServerNamePatternStrings),
+		PrivateKey:               c.PrivateKey,
+		MinClientVer:             bytes.Clone(c.MinClientVer),
+		MaxClientVer:             bytes.Clone(c.MaxClientVer),
+		MaxTimeDiff:              c.MaxTimeDiff,
+		ShortIds:                 maps.Clone(c.ShortIds),
+		Mldsa65Key:               c.Mldsa65Key,
+		LimitFallbackUpload:      c.LimitFallbackUpload,
+		LimitFallbackDownload:    c.LimitFallbackDownload,
+		ProbeTimeout:             c.ProbeTimeout,
+		MaxPostHandshakeWait:     c.MaxPostHandshakeWait,
 		// [REALITY] SECTION END
 		Rand:                                c.Rand,
 		Time:                                c.Time,

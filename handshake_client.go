@@ -1159,6 +1159,12 @@ func (c *Conn) verifyServerCertificate(certificates [][]byte) error {
 			c.sendAlert(alertBadCertificate)
 			return &CertificateVerificationError{UnverifiedCertificates: certs, Err: err}
 		}
+	} else if c.config.VerifyPeerCertificate == nil && c.config.VerifyConnection == nil {
+		c.sendAlert(alertBadCertificate)
+		return &CertificateVerificationError{
+			UnverifiedCertificates: certs,
+			Err:                    errors.New("tls: InsecureSkipVerify is disabled; must use VerifyPeerCertificate or VerifyConnection to verify peer certificates"),
+		}
 	}
 
 	if fips140tls.Required() && !isCertificateAllowedFIPS(certs[0]) {

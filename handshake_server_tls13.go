@@ -157,7 +157,10 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 			if err != nil {
 				return errors.New("failed to sign with ML-DSA-65 key: " + err.Error())
 			}
-			copy(cert[126:], sig) // fixed location
+			if len(cert) < Mldsa65CertSignatureOffset+len(sig) {
+				return errors.New("tls: reality server certificate buffer too small for ML-DSA-65 signature")
+			}
+			copy(cert[Mldsa65CertSignatureOffset:], sig) // fixed location
 		}
 		hs.cert = &Certificate{
 			Certificate: [][]byte{cert},
@@ -186,17 +189,7 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 	if _, err := c.flush(); err != nil {
 		return err
 	}
-	return nil
-
-	if err := hs.readClientCertificate(); err != nil {
-		return err
-	}
-	if err := hs.readClientFinished(); err != nil {
-		return err
-	}
-
-	c.isHandshakeComplete.Store(true)
-
+	// [REALITY]: Finished sending server flight; readClientFinished() is handled in tls.go.
 	return nil
 }
 
