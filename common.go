@@ -1054,6 +1054,23 @@ const (
 	RecordTypeApplicationData       = 0x17
 	TLS12RecordVersionMajor         = 3
 	TLS12RecordVersionMinor         = 3
+
+	realityIndexServerHello            = 0
+	realityIndexChangeCipherSpec       = 1
+	realityIndexEncryptedExtensions    = 2
+	realityIndexCertificate            = 3
+	realityIndexCertificateVerify      = 4
+	realityIndexFinished               = 5
+	realityIndexNewSessionTicket       = 6
+
+	realityChangeCipherSpecRecordLen   = 6
+	realityChangeCipherSpecPayloadByte = 1
+	realityEncryptedExtensionsMinLen   = 512
+	realityInitialS2CBufCap            = 4096
+	realityX25519KeyLen                = 32
+	realitySessionIDLen                = 32
+	realityClientTimeOffset            = 4
+	realityClientShortIDOffset         = 8
 )
 
 var globalServerNameRegexCache sync.Map

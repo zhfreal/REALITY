@@ -227,7 +227,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			}
 			var peerPub, peerPub2 []byte
 			for _, keyShare := range hs.clientHello.keyShares {
-				if keyShare.group == X25519MLKEM768 && len(keyShare.data) == mlkem.EncapsulationKeySize768+32 {
+				if keyShare.group == X25519MLKEM768 && len(keyShare.data) == mlkem.EncapsulationKeySize768+realityX25519KeyLen {
 					if peerPub2 != nil {
 						peerPub2 = nil // ensure fail
 						break          // ensure once
@@ -235,7 +235,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					peerPub2 = keyShare.data[mlkem.EncapsulationKeySize768:]
 					continue // fast continue
 				}
-				if keyShare.group == X25519 && len(keyShare.data) == 32 {
+				if keyShare.group == X25519 && len(keyShare.data) == realityX25519KeyLen {
 					peerPub = keyShare.data
 					break // ensure order
 				}
@@ -271,8 +271,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					}
 					copy(hs.clientHello.sessionId, ciphertext[:])
 					copy(hs.c.ClientVer[:], plainText[:])
-					hs.c.ClientTime = time.Unix(int64(binary.BigEndian.Uint32(plainText[4:])), 0)
-					copy(hs.c.ClientShortId[:], plainText[8:])
+					hs.c.ClientTime = time.Unix(int64(binary.BigEndian.Uint32(plainText[realityClientTimeOffset:])), 0)
+					copy(hs.c.ClientShortId[:], plainText[realityClientShortIDOffset:])
 					if config.Show {
 						fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientVer: %v\n", remoteAddr, hs.c.ClientVer)
 						fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientTime: %v\n", remoteAddr, hs.c.ClientTime)
@@ -312,7 +312,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	}()
 
 	go func() {
-		s2cSaved := make([]byte, 0, 4*1024)
+		s2cSaved := make([]byte, 0, realityInitialS2CBufCap)
 		bufPtr := realityServerBufPool.Get().(*[]byte)
 		defer realityServerBufPool.Put(bufPtr)
 		buf := *bufPtr
@@ -342,14 +342,14 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if hs.c.out.handshakeLen[i] != 0 {
 					continue
 				}
-				if i == 6 && len(s2cSaved) == 0 {
+				if i == realityIndexNewSessionTicket && len(s2cSaved) == 0 {
 					break
 				}
 				if handshakeLen == 0 && len(s2cSaved) > recordHeaderLen {
 					if Value(s2cSaved[1:3]...) != VersionTLS12 ||
-						(i == 0 && (recordType(s2cSaved[0]) != recordTypeHandshake || s2cSaved[5] != typeServerHello)) ||
-						(i == 1 && (recordType(s2cSaved[0]) != recordTypeChangeCipherSpec || s2cSaved[5] != 1)) ||
-						(i > 1 && recordType(s2cSaved[0]) != recordTypeApplicationData) {
+						(i == realityIndexServerHello && (recordType(s2cSaved[0]) != recordTypeHandshake || s2cSaved[5] != typeServerHello)) ||
+						(i == realityIndexChangeCipherSpec && (recordType(s2cSaved[0]) != recordTypeChangeCipherSpec || s2cSaved[5] != realityChangeCipherSpecPayloadByte)) ||
+						(i > realityIndexChangeCipherSpec && recordType(s2cSaved[0]) != recordTypeApplicationData) {
 						break f
 					}
 					handshakeLen = recordHeaderLen + Value(s2cSaved[3:5]...)
@@ -360,15 +360,15 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if handshakeLen > size { // too long
 					break f
 				}
-				if i == 1 && handshakeLen > 0 && handshakeLen != 6 {
+				if i == realityIndexChangeCipherSpec && handshakeLen > 0 && handshakeLen != realityChangeCipherSpecRecordLen {
 					break f
 				}
-				if i == 2 && handshakeLen > 512 {
+				if i == realityIndexEncryptedExtensions && handshakeLen > realityEncryptedExtensionsMinLen {
 					hs.c.out.handshakeLen[i] = handshakeLen
 					hs.c.out.handshakeBuf = make([]byte, 0, handshakeLen)
 					break
 				}
-				if i == 6 && handshakeLen > 0 {
+				if i == realityIndexNewSessionTicket && handshakeLen > 0 {
 					hs.c.out.handshakeLen[i] = handshakeLen
 					break
 				}
@@ -376,13 +376,13 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					mutex.Unlock()
 					continue f
 				}
-				if i == 0 {
+				if i == realityIndexServerHello {
 					hs.hello = new(serverHelloMsg)
 					if !hs.hello.unmarshal(s2cSaved[recordHeaderLen:handshakeLen]) ||
 						hs.hello.vers != VersionTLS12 || hs.hello.supportedVersion != VersionTLS13 ||
 						cipherSuiteTLS13ByID(hs.hello.cipherSuite) == nil ||
-						(!(hs.hello.serverShare.group == X25519 && len(hs.hello.serverShare.data) == 32) &&
-							!(hs.hello.serverShare.group == X25519MLKEM768 && len(hs.hello.serverShare.data) == mlkem.CiphertextSize768+32)) {
+						(!(hs.hello.serverShare.group == X25519 && len(hs.hello.serverShare.data) == realityX25519KeyLen) &&
+							!(hs.hello.serverShare.group == X25519MLKEM768 && len(hs.hello.serverShare.data) == mlkem.CiphertextSize768+realityX25519KeyLen)) {
 						break f
 					}
 				}
@@ -487,7 +487,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			break
 		}
 		mutex.Unlock()
-		if hs.c.out.handshakeLen[0] == 0 { // if the target sent an incorrect Server Hello, or before that
+		if hs.c.out.handshakeLen[realityIndexServerHello] == 0 { // if the target sent an incorrect Server Hello, or before that
 			if hs.c.conn == conn { // if we processed the Client Hello successfully but the target did not
 				waitGroup.Add(1)
 				go func() {
@@ -526,7 +526,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		failureReason = fmt.Sprintf("server name mismatch: %s", hs.clientHello.serverName)
 	} else if hs.c.conn != conn {
 		failureReason = "authentication failed or validation criteria not met"
-	} else if hs.c.out.handshakeLen[0] == 0 {
+	} else if hs.c.out.handshakeLen[realityIndexServerHello] == 0 {
 		failureReason = "target sent incorrect server hello or handshake incomplete"
 	} else {
 		failureReason = "handshake did not complete successfully"

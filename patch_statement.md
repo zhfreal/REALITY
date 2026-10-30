@@ -140,7 +140,7 @@ The modifications against original upstream are organized into two principal cat
   - Handled `<-ctx.Done()` within the handshake wait loop to abort promptly and close connections when clients terminate or time out, eliminating orphaned server handshake goroutines.
 * **Malicious / Corrupt Record Length Guard & Named Constants**:
   - Added bounds validation (`length >= RecordMinEncryptedLen`) ensuring minimum 5-byte TLS record header + 16-byte AEAD authentication tag before slice allocation, preventing `makeslice: len out of range` runtime panics.
-  - Replaced raw numbers and figures in comparisons with named constants (`RecordTypeChangeCipherSpec`, `RecordTypeApplicationData`, `RecordTypeAlert`, `TLS12RecordVersionMajor`, `TLS12RecordVersionMinor`, `RecordHeaderLen`, `RecordMinAEADTagLen`, `Mldsa65CertSignatureOffset`).
+  - Replaced raw numbers and figures in comparisons with named constants (`RecordTypeChangeCipherSpec`, `RecordTypeApplicationData`, `RecordTypeAlert`, `TLS12RecordVersionMajor`, `TLS12RecordVersionMinor`, `RecordHeaderLen`, `RecordMinAEADTagLen`, `Mldsa65CertSignatureOffset`, `realityIndexServerHello`, `realityIndexChangeCipherSpec`, `realityIndexEncryptedExtensions`, `realityIndexNewSessionTicket`, `realityChangeCipherSpecRecordLen`, `realityChangeCipherSpecPayloadByte`, `realityEncryptedExtensionsMinLen`, `realityInitialS2CBufCap`, `realityX25519KeyLen`, `realitySessionIDLen`, `realityClientTimeOffset`, `realityClientShortIDOffset`).
 
 ---
 

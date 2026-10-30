@@ -178,7 +178,7 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 	if err := hs.sendServerFinished(); err != nil {
 		return err
 	}
-	if hs.c.out.handshakeLen[6] != 0 {
+	if hs.c.out.handshakeLen[realityIndexNewSessionTicket] != 0 {
 		if _, err := c.writeRecord(recordTypeHandshake, []byte{typeNewSessionTicket}); err != nil {
 			return err
 		}
