@@ -53,6 +53,17 @@ func (e *echConfigErr) Error() string {
 	return fmt.Sprintf("tls: malformed ECHConfig, invalid %s field", e.field)
 }
 
+// ParseECHConfig is the exported wrapper for parsing an ECHConfig
+func ParseECHConfig(enc []byte) (skip bool, ec EchConfig, err error) {
+	return parseECHConfig(enc)
+}
+
+// ParseECHExt is the exported wrapper for parsing an ECH extension
+func ParseECHExt(ext []byte) (echType uint8, cs EchCipher, configID uint8, encap []byte, payload []byte, err error) {
+	t, cs, id, encap, payload, err := parseECHExt(ext)
+	return uint8(t), cs, id, encap, payload, err
+}
+
 func parseECHConfig(enc []byte) (skip bool, ec EchConfig, err error) {
 	s := cryptobyte.String(enc)
 	ec.raw = enc
@@ -504,9 +515,7 @@ const (
 )
 
 func parseECHExt(ext []byte) (echType echExtType, cs EchCipher, configID uint8, encap []byte, payload []byte, err error) {
-	data := make([]byte, len(ext))
-	copy(data, ext)
-	s := cryptobyte.String(data)
+	s := cryptobyte.String(ext)
 	var echInt uint8
 	if !s.ReadUint8(&echInt) {
 		err = errMalformedECHExt

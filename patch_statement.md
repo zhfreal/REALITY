@@ -52,6 +52,12 @@ The modifications against original upstream are organized into two principal cat
     ```
   - Preserves half-close semantics across wrapped TCP streams without panicking when underlying transport is an arbitrary `net.Conn` (e.g. `net.PipeConn`).
 
+### 2.4 Exported Zero-Copy ECH Configuration & Extension Decoders (`ech.go`)
+* **Exported Public Parsers**:
+  - Exported `ParseECHConfig` and `ParseECHExt` wrappers around `parseECHConfig` and `parseECHExt` to allow external consumers (e.g., Xray-core) to decode and inspect Encrypted Client Hello configurations and extensions directly.
+* **Zero-Copy Extension Parsing**:
+  - Removed intermediate heap slice copy `data := make([]byte, len(ext)); copy(data, ext)` in `parseECHExt`, parsing directly via `cryptobyte.String(ext)` to eliminate unnecessary memory allocation during ECH extraction.
+
 ---
 
 ## 3. Type 2: Bug Fixes, Concurrency & Security Remediations
@@ -153,5 +159,6 @@ The modifications against original upstream are organized into two principal cat
 | `tls.go` | **Modified** | **Performance & Concurrency** | Listener shutdown panic elimination (`done chan`, `closeOnce`), scratch buffer pooling (`realityServerBufPool sync.Pool`), dedicated `handshakeBuf` slice, stack-allocated `[32]byte` arrays, half-close `CloseWriteConn`, nil checks on `target` and `RemoteAddr()`, bounded post-handshake record polling with `MaxPostHandshakeWait` and `ctx.Done()` cancellation, and `RecordMinEncryptedLen` bounds guards. |
 | `handshake_server_tls13.go` | **Modified** | **Security / Bounds** | Bounds check `len(cert) < Mldsa65CertSignatureOffset+len(sig)` before copying ML-DSA-65 signature with named constant `Mldsa65CertSignatureOffset`. |
 | `handshake_client.go` | **Modified** | **Security** | Strict peer certificate verification (unverified `InsecureSkipVerify` rejected). |
+| `ech.go` | **Modified** | **Features & Performance** | Exported zero-copy ECH configuration and extension decoders (`ParseECHConfig`, `ParseECHExt`), eliminating intermediate heap slice copies via direct `cryptobyte.String(ext)` decoding. |
 | `reality_test.go` | **Added** | **Testing** | Comprehensive unit test suite covering wildcard matching, lazy compilation under concurrency, domain synthesis, probe SNI selection, and clone concurrency. |
 
