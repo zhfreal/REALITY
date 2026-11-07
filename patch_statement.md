@@ -1,6 +1,6 @@
 # Codebase Change Statement: REALITY
 
-**Current Codebase:** `zhfreal/REALITY` (`reality-wildcard-patches`)  
+**Current Codebase:** `zhfreal/REALITY` (`reality-wildcard-patches`, Tag: `v1.26.9-patch7` / `v1.26.9+patch7`)  
 **Original Upstream Baseline:** `XTLS/REALITY` (Commit `83f621788ca88b83179810b12baa7ae518aacb83`, baseline used in Xray-core v26.10.21)  
 **Repository Location:** `./reality-mine`  
 **Status:** Production-Ready, Race-Verified (`go test -race ./...` passing 100%)
