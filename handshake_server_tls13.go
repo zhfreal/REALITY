@@ -26,6 +26,7 @@ import (
 	"math/big"
 	"slices"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/xtls/reality/fips140tls"
@@ -72,23 +73,31 @@ type serverHandshakeStateTLS13 struct {
 
 // [REALITY] SECTION: do handshake
 var (
+	realityCertOnce   sync.Once
 	ed25519Priv       ed25519.PrivateKey
 	signedCert        []byte
 	signedCertMldsa65 []byte
 )
 
-func init() {
-	certificate := x509.Certificate{SerialNumber: &big.Int{}}
-	certificateMldsa65 := x509.Certificate{SerialNumber: &big.Int{}, ExtraExtensions: []pkix.Extension{{Id: []int{0, 0}, Value: empty[:3309]}}}
-	_, ed25519Priv, _ = ed25519.GenerateKey(rand.Reader)
-	signedCert, _ = x509.CreateCertificate(rand.Reader, &certificate, &certificate, ed25519.PublicKey(ed25519Priv[32:]), ed25519Priv)
-	signedCertMldsa65, _ = x509.CreateCertificate(rand.Reader, &certificateMldsa65, &certificateMldsa65, ed25519.PublicKey(ed25519Priv[32:]), ed25519Priv)
+func ensureRealityCerts() {
+	realityCertOnce.Do(func() {
+		certificate := x509.Certificate{SerialNumber: &big.Int{}}
+		const mldsa65SignatureSize = 3309
+									var mldsaPlaceholder [mldsa65SignatureSize]byte
+		certificateMldsa65 := x509.Certificate{SerialNumber: &big.Int{}, ExtraExtensions: []pkix.Extension{{Id: []int{0, 0}, Value: mldsaPlaceholder[:]}}}
+		_, ed25519Priv, _ = ed25519.GenerateKey(rand.Reader)
+		signedCert, _ = x509.CreateCertificate(rand.Reader, &certificate, &certificate, ed25519.PublicKey(ed25519Priv[32:]), ed25519Priv)
+		signedCertMldsa65, _ = x509.CreateCertificate(rand.Reader, &certificateMldsa65, &certificateMldsa65, ed25519.PublicKey(ed25519Priv[32:]), ed25519Priv)
+	})
 }
 
 func (hs *serverHandshakeStateTLS13) handshake() error {
 	c := hs.c
 	if c.config.Show {
-		remoteAddr := c.RemoteAddr().String()
+		var remoteAddr string
+		if c.RemoteAddr() != nil {
+			remoteAddr = c.RemoteAddr().String()
+		}
 		fmt.Printf("REALITY remoteAddr: %v\tis using X25519MLKEM768 for TLS' communication: %v\n", remoteAddr, hs.hello.serverShare.group == X25519MLKEM768)
 		fmt.Printf("REALITY remoteAddr: %v\tis using ML-DSA-65 for cert's extra signature: %v\n", remoteAddr, c.config.Mldsa65Key != nil)
 	}
@@ -100,6 +109,9 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 	*/
 	{
 		hs.suite = cipherSuiteTLS13ByID(hs.hello.cipherSuite)
+		if hs.suite == nil {
+			return errors.New("tls: unsupported cipher suite in server hello")
+		}
 		c.cipherSuite = hs.suite.id
 		hs.transcript = hs.suite.hash.New()
 
@@ -110,22 +122,47 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 				break
 			}
 		}
+		if peerData == nil {
+			return errors.New("tls: missing peer key share for selected group")
+		}
 
 		var peerPub = peerData
 		if hs.hello.serverShare.group == X25519MLKEM768 {
+			if len(peerData) < mlkem.EncapsulationKeySize768+realityX25519KeyLen {
+				return errors.New("tls: invalid X25519MLKEM768 key share length")
+			}
 			peerPub = peerData[mlkem.EncapsulationKeySize768:]
 		}
 
-		key, _ := generateECDHEKey(c.config.rand(), X25519)
+		key, err := generateECDHEKey(c.config.rand(), X25519)
+		if err != nil {
+			return err
+		}
+		if len(hs.hello.serverShare.data) < realityX25519KeyLen {
+			return errors.New("tls: server share buffer too small")
+		}
 		copy(hs.hello.serverShare.data, key.PublicKey().Bytes())
-		peerKey, _ := key.Curve().NewPublicKey(peerPub)
-		hs.sharedKey, _ = key.ECDH(peerKey)
+		peerKey, err := key.Curve().NewPublicKey(peerPub)
+		if err != nil {
+			return errors.New("tls: invalid peer public key: " + err.Error())
+		}
+		hs.sharedKey, err = key.ECDH(peerKey)
+		if err != nil {
+			return errors.New("tls: ECDH failed: " + err.Error())
+		}
 
 		if hs.hello.serverShare.group == X25519MLKEM768 {
-			k, _ := mlkem.NewEncapsulationKey768(peerData[:mlkem.EncapsulationKeySize768])
+			if len(hs.hello.serverShare.data) < mlkem.CiphertextSize768+realityX25519KeyLen {
+				return errors.New("tls: server share buffer too small for X25519MLKEM768")
+			}
+			k, err := mlkem.NewEncapsulationKey768(peerData[:mlkem.EncapsulationKeySize768])
+			if err != nil {
+				return errors.New("tls: invalid ML-KEM-768 key: " + err.Error())
+			}
 			mlkemSharedSecret, ciphertext := k.Encapsulate()
 			hs.sharedKey = append(mlkemSharedSecret, hs.sharedKey...)
-			copy(hs.hello.serverShare.data, append(ciphertext, hs.hello.serverShare.data[:32]...))
+			copy(hs.hello.serverShare.data[:mlkem.CiphertextSize768], ciphertext)
+			copy(hs.hello.serverShare.data[mlkem.CiphertextSize768:], key.PublicKey().Bytes())
 		}
 
 		c.serverName = hs.clientHello.serverName
@@ -139,6 +176,7 @@ func (hs *serverHandshakeStateTLS13) handshake() error {
 		}
 	*/
 	{
+		ensureRealityCerts()
 		var cert []byte
 		if c.config.Mldsa65Key != nil {
 			cert = bytes.Clone(signedCertMldsa65)

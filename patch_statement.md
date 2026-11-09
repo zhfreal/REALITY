@@ -13,11 +13,13 @@ This document specifies the complete architectural, functional, and security del
 
 The modifications against original upstream are organized into two principal categories:
 1. **Type 1: New Features & Cryptographic Capabilities**: Zero-allocation wildcard domain pattern pre-compilation, anti-DPI active probing with synthesized 5-character subdomain prefixes, and half-close connection propagation.
+
+- **Named Default Constants for All Tunable Parameters (`common.go`, `record_detect.go`, `reality.go`)**: Defined all added and modified timeouts, intervals, timer initializations, cache limits, and record-detection thresholds (`DefaultPostHandshakeCopyTimeout`, `DefaultMirrorCertRefreshInterval`, `DefaultCloseWaitDeadline`, `DefaultPooledTimerInitDuration`, `DefaultMaxHandshakeRecords`, `CCSProbeWaitDuration`, `CCSProbeStage1Count`..`CCSProbeStage3MaxResult`, `MLDSA65SignatureSize`) as named constants instead of inline numeric literals.
 2. **Type 2: Bug Fixes, Concurrency & Security Remediations**: Listener panic elimination on shutdown (`send on closed channel`), active probe connection burst deduplication and `CLOSE_WAIT` socket leak fixes, handshake memory aliasing elimination, alert inspection index bounds guards, scratch buffer memory pooling, and strict peer verification.
 
 ---
 
-## 2. Type 1: New Features & Protocol Enhancements
+## 2. New Features
 
 ### 2.1 Zero-Allocation Wildcard SNI Pattern Matching & Pre-compilation (`common.go`, `tls.go`)
 * **Thread-Safe Pattern Pre-compilation**:
@@ -60,7 +62,7 @@ The modifications against original upstream are organized into two principal cat
 
 ---
 
-## 3. Type 2: Bug Fixes, Concurrency & Security Remediations
+## 3. Bugfixes
 
 ### 3.1 Listener Panic Elimination on Shutdown (`tls.go`)
 * **Elimination of `panic: send on closed channel`**:
@@ -137,6 +139,21 @@ The modifications against original upstream are organized into two principal cat
   - Leftover standard TLS post-flight logic (`readClientCertificate()`, `readClientFinished()`, `c.isHandshakeComplete.Store(true)`) below this return triggered compiler and linter `unreachable code` warnings.
   - Removed the unreachable dead code block, ensuring clean compilation and passing `go vet ./...` without warnings.
 
+### 3.11 Recursive `RLock` Deadlock Fix, Cryptographic Error & Bounds Hardening, Handshake Deadlines, `s2cSaved` Pooling & Lazy Certificate Initialization (`record_detect.go`, `handshake_server_tls13.go`, `tls.go`, `common.go`, `go.mod`)
+* **Elimination of Recursive `sync.RWMutex.RLock()` Deadlock in Active Probing (`record_detect.go`)**:
+  - `DetectPostHandshakeRecordsLens` acquired `config.mutex.RLock()` and invoked `GetProbeSNI(config, pattern)` inside the loop, which acquired `config.mutex.RLock()` a second time on the same goroutine. In Go's `sync.RWMutex`, recursive read-locking deadlocks whenever a concurrent writer (such as `CompileServerNamePatterns()`) calls `Lock()` between the outer and inner `RLock()`.
+  - Snapshotted enabled patterns under `config.mutex.RLock()`, released `RUnlock()`, and resolved `GetProbeSNI` outside the lock.
+* **Server TLS 1.3 Cryptographic Error Handling, Bounds Validation & Zero-Allocation Key Share Copy (`handshake_server_tls13.go`)**:
+  - Added explicit nil and bounds checks on `hs.suite`, `peerData`, `peerData` length for `X25519MLKEM768` (`>= mlkem.EncapsulationKeySize768+realityX25519KeyLen`), and `hs.hello.serverShare.data` length (`>= mlkem.CiphertextSize768+realityX25519KeyLen`).
+  - Checked errors returned by `generateECDHEKey`, `NewPublicKey`, `key.ECDH`, and `mlkem.NewEncapsulationKey768` instead of discarding them with `_`.
+  - Replaced `copy(hs.hello.serverShare.data, append(ciphertext, hs.hello.serverShare.data[:32]...))` with two direct in-place `copy()` calls, eliminating a 1,120-byte intermediate heap allocation per PQ handshake.
+  - Lazily initialized `ed25519Priv`, `signedCert`, and `signedCertMldsa65` via `sync.Once` (`ensureRealityCerts()`) and removed the unused 17 KiB package-level `empty` slice in `tls.go`.
+* **Active Handshake Deadlines, Context Cancellation Watchdog, Fallback Grace Period & `s2cSaved` Buffer Pool (`tls.go`, `common.go`)**:
+  - Added `HandshakeTimeout` (default `10s`) and `FallbackReadDeadline` (default `5s`) to `Config` and `Config.Clone()`.
+  - Wired caller `ctx` into `hs.ctx`, `readClientHello(ctx)`, and a `context.AfterFunc` watchdog, and enforced handshake deadlines on both `conn` and `target` so stalled connections cannot leak goroutines or sockets.
+  - Set `underlying.SetReadDeadline(time.Now().Add(fallbackReadDeadline))` after fallback `target -> underlying` copy completion so half-open clients cannot hold fallback upload goroutines indefinitely.
+  - Pooled the 4 KiB `s2cSaved` buffer via `realityS2CBufPool`, replaced `time.After(PostHandshakePollInterval)` inside `postHandshakeLoop` with a reusable `*time.Timer`, cancelled in-flight handshakes on `listener.Close()`, fixed `Value(vals ...byte)` to align 1/2/3-byte version slices to major/minor/patch bit positions, checked `len(MinClientVer) == 0` / `len(MaxClientVer) == 0` so non-nil empty slices do not reject valid clients, and converted `timeoutError` methods to pointer receivers `(*timeoutError)`.
+
 ### 3.10 Bounded Post-Handshake Record Mimicry, User Tunability & Context Cancellation (`tls.go`, `common.go`)
 * **Elimination of Infinite Handshake Hangs & User Tunable Timeouts**:
   - In upstream, `Server()` looped indefinitely (`for { time.Sleep(5 * time.Second) }`) waiting for `GlobalPostHandshakeRecordsLens` if the target destination was unprobed or failed active probing, hanging server TLS handshakes forever.
@@ -147,6 +164,21 @@ The modifications against original upstream are organized into two principal cat
 * **Malicious / Corrupt Record Length Guard & Named Constants**:
   - Added bounds validation (`length >= RecordMinEncryptedLen`) ensuring minimum 5-byte TLS record header + 16-byte AEAD authentication tag before slice allocation, preventing `makeslice: len out of range` runtime panics.
   - Replaced raw numbers and figures in comparisons with named constants (`RecordTypeChangeCipherSpec`, `RecordTypeApplicationData`, `RecordTypeAlert`, `TLS12RecordVersionMajor`, `TLS12RecordVersionMinor`, `RecordHeaderLen`, `RecordMinAEADTagLen`, `Mldsa65CertSignatureOffset`, `realityIndexServerHello`, `realityIndexChangeCipherSpec`, `realityIndexEncryptedExtensions`, `realityIndexNewSessionTicket`, `realityChangeCipherSpecRecordLen`, `realityChangeCipherSpecPayloadByte`, `realityEncryptedExtensionsMinLen`, `realityInitialS2CBufCap`, `realityX25519KeyLen`, `realitySessionIDLen`, `realityClientTimeOffset`, `realityClientShortIDOffset`).
+
+---
+
+### 3.12 Single-Allocation ECH Outer ClientHello AAD Payload Zeroing (`ech.go`)
+* **Elimination of Duplicate Heap Allocation in `decodeInnerClientHello` (`ech.go`)**:
+  - Previously, `bytes.Replace(hello[4:], payload, make([]byte, len(payload)), 1)` allocated a temporary zero-filled `make([]byte, len(payload))` slice on the heap before allocating the replacement outer ClientHello slice.
+  - Replaced with `outer := bytes.Clone(hello[4:])` followed by in-place `clear(outer[idx : idx+len(payload)])`, cutting per-handshake ECH AAD reconstruction heap allocations in half.
+
+* **Zero-Allocation Wildcard Regex Cache Lookup & Register Record Header Checks (`common.go`, `record_detect.go`)**:
+  - Keyed `globalServerNameRegexCache` in `compileWildcardRegexp` (`common.go`) directly by the raw wildcard `name` string before invoking `regexp.QuoteMeta` and `strings.ReplaceAll`, eliminating 3 string heap allocations on every cache hit.
+  - Replaced `bytes.Equal(b[:3], []byte{...})` slice literal comparisons in `PostHandshakeRecordDetectConn` and `CCSDetectConn` (`record_detect.go`) with direct 3-byte register comparisons.
+* **Symmetrical Fallback Upload Half-Close Read Deadline, SessionID Length Fast-Filter & Fallback SessionID Restoration (`tls.go`)**:
+  - Applied `_ = target.SetReadDeadline(time.Now().Add(fallbackReadDeadline))` after `target.CloseWrite()` when the client-to-target fallback copy completes (`err == nil`), matching the `target -> underlying` direction and preventing hung destination servers from holding fallback goroutines and sockets open indefinitely.
+  - Added `len(hs.clientHello.sessionId) == realitySessionIDLen` (32 bytes) validation before executing ECDH X25519 scalar multiplication, HKDF-SHA256 key derivation, and AES-GCM decryption in `Server()` (`tls.go`), avoiding unnecessary cryptographic CPU work on non-32-byte `SessionID` ClientHellos, and restored `copy(hs.clientHello.sessionId, ciphertext[:])` immediately after `aead.Open` even when authentication fails so `hs.clientHello.sessionId` (aliased into `hs.clientHello.original`) is never left zeroed out on fallback connections.
+  - Extracted remaining HKDF/key/buffer constants (`realityAuthKeyHKDFSaltLen`, `realityAuthKeyLen`, `realityProbeBufLen`, `DefaultRealityServerBufSize`) in `tls.go`.
 
 ---
 

@@ -133,3 +133,23 @@ func TestConfigCloneConcurrency(t *testing.T) {
 	wg.Wait()
 }
 
+func TestValueVersionEncoding(t *testing.T) {
+	if got, want := Value(26, 7, 11), (26<<16)|(7<<8)|11; got != want {
+		t.Fatalf("Value(26,7,11) = %d, want %d", got, want)
+	}
+	if got, want := Value(26, 7), (26<<16)|(7<<8); got != want {
+		t.Fatalf("Value(26,7) = %d, want %d", got, want)
+	}
+	if got, want := Value(26), 26<<16; got != want {
+		t.Fatalf("Value(26) = %d, want %d", got, want)
+	}
+	if got := Value(); got != 0 {
+		t.Fatalf("Value() = %d, want 0", got)
+	}
+}
+
+func TestFallbackReadDeadlineConstant(t *testing.T) {
+	if DefaultFallbackReadDeadline <= 0 {
+		t.Fatalf("expected positive DefaultFallbackReadDeadline, got %v", DefaultFallbackReadDeadline)
+	}
+}

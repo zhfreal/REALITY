@@ -137,8 +137,10 @@ func NewRatelimitedConn(conn net.Conn, limit *LimitFallback) net.Conn {
 	}
 }
 
+const DefaultRealityServerBufSize = 17 * 1024
+
 var (
-	size  = 17 * 1024
+	size  = DefaultRealityServerBufSize
 	empty = make([]byte, size)
 	types = [7]string{
 		"Server Hello",
@@ -156,11 +158,18 @@ var (
 			return &b
 		},
 	}
+
+	realityS2CBufPool = sync.Pool{
+		New: func() any {
+			b := make([]byte, 0, realityInitialS2CBufCap)
+			return &b
+		},
+	}
 )
 
 func Value(vals ...byte) (value int) {
-	for i, val := range vals {
-		value |= int(val) << ((len(vals) - i - 1) * 8)
+	for i := 0; i < len(vals) && i < 3; i++ {
+		value |= int(vals[i]) << ((2 - i) * 8)
 	}
 	return
 }
@@ -193,6 +202,35 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		}
 	}
 
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ctx.Done() != nil {
+		stop := context.AfterFunc(ctx, func() {
+			_ = target.Close()
+			_ = conn.Close()
+		})
+		defer stop()
+	}
+
+	handshakeTimeout := DefaultHandshakeTimeout
+	if config.HandshakeTimeout > 0 {
+		handshakeTimeout = config.HandshakeTimeout
+	}
+	fallbackReadDeadline := DefaultFallbackReadDeadline
+	if config.FallbackReadDeadline > 0 {
+		fallbackReadDeadline = config.FallbackReadDeadline
+	}
+
+	if dl, ok := ctx.Deadline(); ok {
+		_ = conn.SetDeadline(dl)
+		_ = target.SetDeadline(dl)
+	} else {
+		deadline := time.Now().Add(handshakeTimeout)
+		_ = conn.SetDeadline(deadline)
+		_ = target.SetDeadline(deadline)
+	}
+
 	raw := conn
 	if pc, ok := conn.(*proxyproto.Conn); ok {
 		raw = pc.Raw() // for TCP splicing in io.Copy()
@@ -210,7 +248,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			},
 			config: config,
 		},
-		ctx: context.Background(),
+		ctx: ctx,
 	}
 
 	copying := false
@@ -221,7 +259,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	go func() {
 		for {
 			mutex.Lock()
-			hs.clientHello, _, err = hs.c.readClientHello(context.Background()) // TODO: Change some rules in this function.
+			hs.clientHello, _, err = hs.c.readClientHello(ctx)
 			if copying || err != nil || hs.c.vers != VersionTLS13 || !config.MatchServerName(hs.clientHello.serverName) {
 				break
 			}
@@ -246,7 +284,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			if peerPub == nil {
 				peerPub = peerPub2 // secondary choice: X25519 in X25519MLKEM768
 			}
-			if peerPub != nil && config.PrivateKey != nil {
+			if peerPub != nil && config.PrivateKey != nil && len(hs.clientHello.sessionId) == realitySessionIDLen {
 				func() {
 					peerKey, err := ecdh.X25519().NewPublicKey(peerPub)
 					if err != nil {
@@ -255,7 +293,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					if hs.c.AuthKey, err = config.PrivateKey.ECDH(peerKey); err != nil {
 						return
 					}
-					if hs.c.AuthKey, err = hkdf.Key(sha256.New, hs.c.AuthKey, hs.clientHello.random[:20], "REALITY", 32); err != nil {
+					if hs.c.AuthKey, err = hkdf.Key(sha256.New, hs.c.AuthKey, hs.clientHello.random[:realityAuthKeyHKDFSaltLen], "REALITY", realityAuthKeyLen); err != nil {
 						return
 					}
 					block, _ := aes.NewCipher(hs.c.AuthKey)
@@ -263,13 +301,15 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 					if config.Show {
 						fmt.Printf("REALITY remoteAddr: %v\ths.c.AuthKey[:16]: %v\tAEAD: %T\n", remoteAddr, hs.c.AuthKey[:16], aead)
 					}
-					var ciphertext, plainText [32]byte
+					var ciphertext, plainText [realitySessionIDLen]byte
 					copy(ciphertext[:], hs.clientHello.sessionId)
 					copy(hs.clientHello.sessionId, plainText[:]) // hs.clientHello.sessionId points to hs.clientHello.raw[39:]
-					if _, err = aead.Open(plainText[:0], hs.clientHello.random[20:], ciphertext[:], hs.clientHello.original); err != nil {
+					_, openErr := aead.Open(plainText[:0], hs.clientHello.random[realityAuthKeyHKDFSaltLen:], ciphertext[:], hs.clientHello.original)
+					copy(hs.clientHello.sessionId, ciphertext[:])
+					if openErr != nil {
+						err = openErr
 						return
 					}
-					copy(hs.clientHello.sessionId, ciphertext[:])
 					copy(hs.c.ClientVer[:], plainText[:])
 					hs.c.ClientTime = time.Unix(int64(binary.BigEndian.Uint32(plainText[realityClientTimeOffset:])), 0)
 					copy(hs.c.ClientShortId[:], plainText[realityClientShortIDOffset:])
@@ -278,8 +318,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 						fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientTime: %v\n", remoteAddr, hs.c.ClientTime)
 						fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientShortId: %v\n", remoteAddr, hs.c.ClientShortId)
 					}
-					if (config.MinClientVer == nil || Value(hs.c.ClientVer[:]...) >= Value(config.MinClientVer...)) &&
-						(config.MaxClientVer == nil || Value(hs.c.ClientVer[:]...) <= Value(config.MaxClientVer...)) &&
+					if (len(config.MinClientVer) == 0 || Value(hs.c.ClientVer[:]...) >= Value(config.MinClientVer...)) &&
+						(len(config.MaxClientVer) == 0 || Value(hs.c.ClientVer[:]...) <= Value(config.MaxClientVer...)) &&
 						(config.MaxTimeDiff == 0 || time.Since(hs.c.ClientTime).Abs() <= config.MaxTimeDiff) &&
 						(config.ShortIds[hs.c.ClientShortId]) {
 						hs.c.conn = conn
@@ -293,6 +333,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		}
 		mutex.Unlock()
 		if hs.c.conn != conn {
+			_ = underlying.SetDeadline(time.Time{})
+			_ = target.SetDeadline(time.Time{})
 			if config.Show && hs.clientHello != nil {
 				fmt.Printf("REALITY remoteAddr: %v\tforwarded SNI: %v\n", remoteAddr, hs.clientHello.serverName)
 			}
@@ -303,6 +345,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if ok {
 					targetWriterCloser.CloseWrite()
 				}
+				_ = target.SetReadDeadline(time.Now().Add(fallbackReadDeadline))
 			} else {
 				// Close target when encountering RST (or any other errors)
 				target.Close()
@@ -312,7 +355,14 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	}()
 
 	go func() {
-		s2cSaved := make([]byte, 0, realityInitialS2CBufCap)
+		s2cBufPtr := realityS2CBufPool.Get().(*[]byte)
+		s2cSaved := (*s2cBufPtr)[:0]
+		defer func() {
+			if cap(s2cSaved) <= size {
+				s2cSaved = s2cSaved[:0]
+				realityS2CBufPool.Put(&s2cSaved)
+			}
+		}()
 		bufPtr := realityServerBufPool.Get().(*[]byte)
 		defer realityServerBufPool.Put(bufPtr)
 		buf := *bufPtr
@@ -403,7 +453,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if remaining > 0 {
 					_, _ = io.CopyN(io.Discard, target, int64(remaining))
 				}
-				var probeBuf [1]byte
+				var probeBuf [realityProbeBufLen]byte
 				if n, err := target.Read(probeBuf[:]); !hs.c.isHandshakeComplete.Load() {
 					if err != nil {
 						conn.Close()
@@ -422,6 +472,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			}
 			matchedPattern := config.GetMatchedPattern(hs.clientHello.serverName)
 			attempts := 0
+			var pollTimer *time.Timer
 		postHandshakeLoop:
 			for {
 				select {
@@ -476,33 +527,58 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 				if attempts >= maxAttempts {
 					break postHandshakeLoop
 				}
+				if pollTimer == nil {
+					pollTimer = time.NewTimer(PostHandshakePollInterval)
+				} else {
+					if !pollTimer.Stop() {
+						select {
+						case <-pollTimer.C:
+						default:
+						}
+					}
+					pollTimer.Reset(PostHandshakePollInterval)
+				}
 				select {
 				case <-ctx.Done():
 					conn.Close()
 					break postHandshakeLoop
-				case <-time.After(PostHandshakePollInterval):
+				case <-pollTimer.C:
 				}
+			}
+			if pollTimer != nil {
+				pollTimer.Stop()
 			}
 			hs.c.isHandshakeComplete.Store(true)
 			break
 		}
 		mutex.Unlock()
 		if hs.c.out.handshakeLen[realityIndexServerHello] == 0 { // if the target sent an incorrect Server Hello, or before that
+			_ = underlying.SetDeadline(time.Time{})
+			_ = target.SetDeadline(time.Time{})
 			if hs.c.conn == conn { // if we processed the Client Hello successfully but the target did not
 				waitGroup.Add(1)
 				go func() {
-					io.Copy(target, NewRatelimitedConn(underlying, &config.LimitFallbackUpload))
-					waitGroup.Done()
+					defer waitGroup.Done()
+					_, copyErr := io.Copy(target, NewRatelimitedConn(underlying, &config.LimitFallbackUpload))
+					if copyErr == nil {
+						if cw, ok := target.(CloseWriteConn); ok {
+							_ = cw.CloseWrite()
+						}
+						_ = target.SetReadDeadline(time.Now().Add(fallbackReadDeadline))
+					} else {
+						_ = target.Close()
+					}
 				}()
 			}
-			conn.Write(s2cSaved)
-			io.Copy(underlying, NewRatelimitedConn(target, &config.LimitFallbackDownload))
+			_, _ = conn.Write(s2cSaved)
+			_, _ = io.Copy(underlying, NewRatelimitedConn(target, &config.LimitFallbackDownload))
 			// Here is bidirectional direct forwarding:
 			// client ---underlying--- server ---target--- dest
 			// Call `underlying.CloseWrite()` once `io.Copy()` returned
 			if cw, ok := underlying.(CloseWriteConn); ok {
-				cw.CloseWrite()
+				_ = cw.CloseWrite()
 			}
+			_ = underlying.SetReadDeadline(time.Now().Add(fallbackReadDeadline))
 		}
 		waitGroup.Done()
 	}()
@@ -513,6 +589,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		fmt.Printf("REALITY remoteAddr: %v\ths.c.isHandshakeComplete.Load(): %v\n", remoteAddr, hs.c.isHandshakeComplete.Load())
 	}
 	if hs.c.isHandshakeComplete.Load() {
+		_ = conn.SetDeadline(time.Time{})
 		return hs.c, nil
 	}
 
@@ -564,6 +641,8 @@ type listener struct {
 	net.Listener
 	config    *Config
 	// [REALITY] SECTION: listener
+	ctx       context.Context
+	cancel    context.CancelFunc
 	conns     chan net.Conn
 	done      chan struct{}
 	closeOnce sync.Once
@@ -596,6 +675,9 @@ func (l *listener) Accept() (net.Conn, error) {
 func (l *listener) Close() error {
 	err := l.Listener.Close()
 	l.closeOnce.Do(func() {
+		if l.cancel != nil {
+			l.cancel()
+		}
 		close(l.done)
 	})
 	for {
@@ -616,9 +698,12 @@ func (l *listener) Close() error {
 // at least one certificate or else set GetCertificate.
 func NewListener(inner net.Listener, config *Config) net.Listener {
 	go DetectPostHandshakeRecordsLens(config)
+	ctx, cancel := context.WithCancel(context.Background())
 	l := &listener{
 		Listener: inner,
 		config:   config,
+		ctx:      ctx,
+		cancel:   cancel,
 		conns:    make(chan net.Conn),
 		done:     make(chan struct{}),
 	}
@@ -630,6 +715,9 @@ func NewListener(inner net.Listener, config *Config) net.Listener {
 				l.err = acceptErr
 				l.errMu.Unlock()
 				l.closeOnce.Do(func() {
+					if l.cancel != nil {
+						l.cancel()
+					}
 					close(l.done)
 				})
 				return
@@ -637,12 +725,16 @@ func NewListener(inner net.Listener, config *Config) net.Listener {
 			go func(conn net.Conn) {
 				var tlsConn net.Conn
 				defer func() {
-					if r := recover(); r != nil && tlsConn != nil {
-						_ = tlsConn.Close()
+					if r := recover(); r != nil {
+						if tlsConn != nil {
+							_ = tlsConn.Close()
+						} else {
+							_ = conn.Close()
+						}
 					}
 				}()
 				var hsErr error
-				tlsConn, hsErr = Server(context.Background(), conn, l.config)
+				tlsConn, hsErr = Server(l.ctx, conn, l.config)
 				if hsErr == nil {
 					select {
 					case l.conns <- tlsConn:
@@ -677,11 +769,11 @@ func Listen(network, laddr string, config *Config) (net.Listener, error) {
 
 type timeoutError struct{}
 
-var _ error = timeoutError{}
+var _ error = (*timeoutError)(nil)
 
-func (timeoutError) Error() string   { return "tls: DialWithDialer timed out" }
-func (timeoutError) Timeout() bool   { return true }
-func (timeoutError) Temporary() bool { return true }
+func (*timeoutError) Error() string   { return "tls: DialWithDialer timed out" }
+func (*timeoutError) Timeout() bool   { return true }
+func (*timeoutError) Temporary() bool { return true }
 
 // DialWithDialer connects to the given network address using dialer.Dial and
 // then initiates a TLS handshake, returning the resulting TLS connection. Any

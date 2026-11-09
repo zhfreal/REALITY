@@ -611,6 +611,8 @@ type Config struct {
 
 	ProbeTimeout         time.Duration
 	MaxPostHandshakeWait time.Duration
+	HandshakeTimeout     time.Duration
+	FallbackReadDeadline time.Duration
 	// [REALITY] SECTION END
 
 	// Rand provides the source of entropy for the connection.
@@ -1046,8 +1048,17 @@ const (
 	RecordMinEncryptedLen           = RecordHeaderLen + RecordMinAEADTagLen // 21
 	Mldsa65CertSignatureOffset      = 126
 	DefaultRandomSubdomainLen       = 5
+	DefaultHandshakeTimeout         = 10 * time.Second
+	DefaultFallbackReadDeadline     = 5 * time.Second
 	MaxDetectRecordBufferSize       = 64 * 1024
 	AlertInspectionBufferSize       = 512
+	CCSProbeWaitDuration            = 1 * time.Second
+	CCSProbeStage1Count             = 2
+	CCSProbeStage1MaxResult         = 1
+	CCSProbeStage2Count             = 15
+	CCSProbeStage2MaxResult         = 16
+	CCSProbeStage3Count             = 16
+	CCSProbeStage3MaxResult         = 32
 	RecordTypeChangeCipherSpec      = 0x14
 	RecordTypeAlert                 = 0x15
 	RecordTypeHandshake             = 0x16
@@ -1069,6 +1080,9 @@ const (
 	realityInitialS2CBufCap            = 4096
 	realityX25519KeyLen                = 32
 	realitySessionIDLen                = 32
+	realityAuthKeyHKDFSaltLen          = 20
+	realityAuthKeyLen                  = 32
+	realityProbeBufLen                 = 1
 	realityClientTimeOffset            = 4
 	realityClientShortIDOffset         = 8
 )
@@ -1076,6 +1090,9 @@ const (
 var globalServerNameRegexCache sync.Map
 
 func compileWildcardRegexp(name string) (*regexp.Regexp, bool) {
+	if val, ok := globalServerNameRegexCache.Load(name); ok {
+		return val.(*regexp.Regexp), true
+	}
 	var pattern string
 	if name == "*" {
 		pattern = "^.+$"
@@ -1083,14 +1100,11 @@ func compileWildcardRegexp(name string) (*regexp.Regexp, bool) {
 		escaped := regexp.QuoteMeta(name)
 		pattern = "^" + strings.ReplaceAll(escaped, "\\*", "[^.]+") + "$"
 	}
-	if val, ok := globalServerNameRegexCache.Load(pattern); ok {
-		return val.(*regexp.Regexp), true
-	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return nil, false
 	}
-	globalServerNameRegexCache.Store(pattern, re)
+	globalServerNameRegexCache.Store(name, re)
 	return re, true
 }
 
@@ -1223,6 +1237,8 @@ func (c *Config) Clone() *Config {
 		LimitFallbackDownload:    c.LimitFallbackDownload,
 		ProbeTimeout:             c.ProbeTimeout,
 		MaxPostHandshakeWait:     c.MaxPostHandshakeWait,
+		HandshakeTimeout:         c.HandshakeTimeout,
+		FallbackReadDeadline:     c.FallbackReadDeadline,
 		// [REALITY] SECTION END
 		Rand:                                c.Rand,
 		Time:                                c.Time,

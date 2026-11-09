@@ -15,7 +15,7 @@ import (
 	"time"
 
 	"github.com/pires/go-proxyproto"
-	utls "github.com/refraction-networking/utls"
+	utls "github.com/metacubex/utls"
 )
 
 // Reality specifc file, used for target detection
@@ -136,18 +136,22 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 	config.CompileServerNamePatterns()
 
 	config.mutex.RLock()
-	sniToPatterns := make(map[string][]string)
+	enabledPatterns := make([]string, 0, len(config.ServerNames))
 	for pattern, enabled := range config.ServerNames {
-		if !enabled {
-			continue
+		if enabled {
+			enabledPatterns = append(enabledPatterns, pattern)
 		}
+	}
+	config.mutex.RUnlock()
+
+	sniToPatterns := make(map[string][]string)
+	for _, pattern := range enabledPatterns {
 		probeSNI := GetProbeSNI(config, pattern)
 		if probeSNI == "" {
 			continue
 		}
 		sniToPatterns[probeSNI] = append(sniToPatterns[probeSNI], pattern)
 	}
-	config.mutex.RUnlock()
 
 	probeTimeout := config.ProbeTimeout
 	if probeTimeout <= 0 {
@@ -288,7 +292,7 @@ func (c *PostHandshakeRecordDetectConn) storeResult(lens []int) {
 }
 
 func (c *PostHandshakeRecordDetectConn) Write(b []byte) (n int, err error) {
-	if len(b) >= 3 && bytes.Equal(b[:3], []byte{RecordTypeChangeCipherSpec, TLS12RecordVersionMajor, TLS12RecordVersionMinor}) {
+	if len(b) >= 3 && (b[0] == RecordTypeChangeCipherSpec && b[1] == TLS12RecordVersionMajor && b[2] == TLS12RecordVersionMinor) {
 		c.CcsSent = true
 	}
 	return c.Conn.Write(b)
@@ -302,7 +306,7 @@ func (c *PostHandshakeRecordDetectConn) Read(b []byte) (n int, err error) {
 	data, _ := io.ReadAll(io.LimitReader(c.Conn, MaxDetectRecordBufferSize))
 	var postHandshakeRecordsLens []int
 	for {
-		if len(data) >= RecordHeaderLen && bytes.Equal(data[:3], []byte{RecordTypeApplicationData, TLS12RecordVersionMajor, TLS12RecordVersionMinor}) {
+		if len(data) >= RecordHeaderLen && (data[0] == RecordTypeApplicationData && data[1] == TLS12RecordVersionMajor && data[2] == TLS12RecordVersionMinor) {
 			length := int(binary.BigEndian.Uint16(data[3:5])) + RecordHeaderLen
 			if length > len(data) {
 				break
@@ -335,7 +339,7 @@ func (c *CCSDetectConn) storeResult(maxCount int) {
 }
 
 func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
-	if len(b) >= 3 && bytes.Equal(b[:3], []byte{RecordTypeChangeCipherSpec, TLS12RecordVersionMajor, TLS12RecordVersionMinor}) {
+	if len(b) >= 3 && (b[0] == RecordTypeChangeCipherSpec && b[1] == TLS12RecordVersionMajor && b[2] == TLS12RecordVersionMinor) {
 		ran := false
 		c.ccsOnce.Do(func() { ran = true })
 		if !ran {
@@ -358,22 +362,22 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 		sendProbePayload := func(count int) bool {
 			msg := bytes.Repeat(CCSMsg, count)
 			c.Conn.Write(msg)
-			time.Sleep(1 * time.Second)
+			time.Sleep(CCSProbeWaitDuration)
 			if hasAlert.Load() {
 				return true
 			}
 			return false
 		}
-		if sendProbePayload(2) {
-			c.storeResult(1)
+		if sendProbePayload(CCSProbeStage1Count) {
+			c.storeResult(CCSProbeStage1MaxResult)
 			return c.Conn.Write(b)
 		}
-		if sendProbePayload(15) {
-			c.storeResult(16)
+		if sendProbePayload(CCSProbeStage2Count) {
+			c.storeResult(CCSProbeStage2MaxResult)
 			return c.Conn.Write(b)
 		}
-		if sendProbePayload(16) {
-			c.storeResult(32)
+		if sendProbePayload(CCSProbeStage3Count) {
+			c.storeResult(CCSProbeStage3MaxResult)
 			return c.Conn.Write(b)
 		}
 		c.storeResult(math.MaxInt)
