@@ -134,17 +134,29 @@ func TestConfigCloneConcurrency(t *testing.T) {
 }
 
 func TestValueVersionEncoding(t *testing.T) {
-	if got, want := Value(26, 7, 11), (26<<16)|(7<<8)|11; got != want {
-		t.Fatalf("Value(26,7,11) = %d, want %d", got, want)
+	if got, want := VersionValue(26, 7, 11), (26<<16)|(7<<8)|11; got != want {
+		t.Fatalf("VersionValue(26,7,11) = %d, want %d", got, want)
 	}
-	if got, want := Value(26, 7), (26<<16)|(7<<8); got != want {
-		t.Fatalf("Value(26,7) = %d, want %d", got, want)
+	if got, want := VersionValue(26, 7), (26<<16)|(7<<8); got != want {
+		t.Fatalf("VersionValue(26,7) = %d, want %d", got, want)
 	}
-	if got, want := Value(26), 26<<16; got != want {
-		t.Fatalf("Value(26) = %d, want %d", got, want)
+	if got, want := VersionValue(26), 26<<16; got != want {
+		t.Fatalf("VersionValue(26) = %d, want %d", got, want)
 	}
-	if got := Value(); got != 0 {
-		t.Fatalf("Value() = %d, want 0", got)
+	if got := VersionValue(); got != 0 {
+		t.Fatalf("VersionValue() = %d, want 0", got)
+	}
+}
+
+func TestValueBigEndian(t *testing.T) {
+	if got, want := Value(0x03, 0x03), 0x0303; got != want {
+		t.Fatalf("Value(0x03, 0x03) = %x, want %x", got, want)
+	}
+	if got, want := Value(0x12, 0x34), 0x1234; got != want {
+		t.Fatalf("Value(0x12, 0x34) = %x, want %x", got, want)
+	}
+	if got, want := Value(0x01, 0x02, 0x03), 0x010203; got != want {
+		t.Fatalf("Value(0x01, 0x02, 0x03) = %x, want %x", got, want)
 	}
 }
 

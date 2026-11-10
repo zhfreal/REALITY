@@ -1,6 +1,6 @@
 # Codebase Change Statement: REALITY
 
-**Current Codebase:** `zhfreal/REALITY` (`reality-wildcard-patches`, Tag: `v1.26.9-patch7` / `v1.26.9+patch7`)  
+**Current Codebase:** `zhfreal/REALITY` (`reality-wildcard-patches`, Tag: `v1.26.9-patch9` / `v1.26.9+patch9`)  
 **Original Upstream Baseline:** `XTLS/REALITY` (Commit `83f621788ca88b83179810b12baa7ae518aacb83`, baseline used in Xray-core v26.10.21)  
 **Repository Location:** `./reality-mine`  
 **Status:** Production-Ready, Race-Verified (`go test -race ./...` passing 100%)
@@ -152,7 +152,7 @@ The modifications against original upstream are organized into two principal cat
   - Added `HandshakeTimeout` (default `10s`) and `FallbackReadDeadline` (default `5s`) to `Config` and `Config.Clone()`.
   - Wired caller `ctx` into `hs.ctx`, `readClientHello(ctx)`, and a `context.AfterFunc` watchdog, and enforced handshake deadlines on both `conn` and `target` so stalled connections cannot leak goroutines or sockets.
   - Set `underlying.SetReadDeadline(time.Now().Add(fallbackReadDeadline))` after fallback `target -> underlying` copy completion so half-open clients cannot hold fallback upload goroutines indefinitely.
-  - Pooled the 4 KiB `s2cSaved` buffer via `realityS2CBufPool`, replaced `time.After(PostHandshakePollInterval)` inside `postHandshakeLoop` with a reusable `*time.Timer`, cancelled in-flight handshakes on `listener.Close()`, fixed `Value(vals ...byte)` to align 1/2/3-byte version slices to major/minor/patch bit positions, checked `len(MinClientVer) == 0` / `len(MaxClientVer) == 0` so non-nil empty slices do not reject valid clients, and converted `timeoutError` methods to pointer receivers `(*timeoutError)`.
+  - Pooled the 4 KiB `s2cSaved` buffer via `realityS2CBufPool`, replaced `time.After(PostHandshakePollInterval)` inside `postHandshakeLoop` with a reusable `*time.Timer`, cancelled in-flight handshakes on `listener.Close()`, restored `Value(vals ...byte)` as standard big-endian integer decoder for TLS record lengths/versions and introduced `VersionValue(vals ...byte)` to align 1/2/3-byte version slices to major/minor/patch bit positions, checked `len(MinClientVer) == 0` / `len(MaxClientVer) == 0` so non-nil empty slices do not reject valid clients, and converted `timeoutError` methods to pointer receivers `(*timeoutError)`.
 
 ### 3.10 Bounded Post-Handshake Record Mimicry, User Tunability & Context Cancellation (`tls.go`, `common.go`)
 * **Elimination of Infinite Handshake Hangs & User Tunable Timeouts**:

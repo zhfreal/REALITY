@@ -168,6 +168,13 @@ var (
 )
 
 func Value(vals ...byte) (value int) {
+	for i, val := range vals {
+		value |= int(val) << ((len(vals) - i - 1) * 8)
+	}
+	return
+}
+
+func VersionValue(vals ...byte) (value int) {
 	for i := 0; i < len(vals) && i < 3; i++ {
 		value |= int(vals[i]) << ((2 - i) * 8)
 	}
@@ -318,8 +325,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 						fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientTime: %v\n", remoteAddr, hs.c.ClientTime)
 						fmt.Printf("REALITY remoteAddr: %v\ths.c.ClientShortId: %v\n", remoteAddr, hs.c.ClientShortId)
 					}
-					if (len(config.MinClientVer) == 0 || Value(hs.c.ClientVer[:]...) >= Value(config.MinClientVer...)) &&
-						(len(config.MaxClientVer) == 0 || Value(hs.c.ClientVer[:]...) <= Value(config.MaxClientVer...)) &&
+					if (len(config.MinClientVer) == 0 || VersionValue(hs.c.ClientVer[:]...) >= VersionValue(config.MinClientVer...)) &&
+						(len(config.MaxClientVer) == 0 || VersionValue(hs.c.ClientVer[:]...) <= VersionValue(config.MaxClientVer...)) &&
 						(config.MaxTimeDiff == 0 || time.Since(hs.c.ClientTime).Abs() <= config.MaxTimeDiff) &&
 						(config.ShortIds[hs.c.ClientShortId]) {
 						hs.c.conn = conn
