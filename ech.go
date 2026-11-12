@@ -413,10 +413,10 @@ func decodeInnerClientHello(outer *clientHelloMsg, encoded []byte) (*clientHello
 }
 
 func decryptECHPayload(context *hpke.Recipient, hello, payload []byte) ([]byte, error) {
-	if len(hello) < 4 {
+	if len(hello) < HandshakeHeaderLen {
 		return nil, errors.New("tls: malformed outer client hello")
 	}
-	outerAAD := bytes.Clone(hello[4:])
+	outerAAD := bytes.Clone(hello[HandshakeHeaderLen:])
 	if idx := bytes.Index(outerAAD, payload); idx >= 0 {
 		clear(outerAAD[idx : idx+len(payload)])
 	}

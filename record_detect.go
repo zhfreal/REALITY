@@ -157,6 +157,10 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 	if probeTimeout <= 0 {
 		probeTimeout = DefaultProbeTimeout
 	}
+	network := config.Type
+	if network == "" {
+		network = "tcp"
+	}
 
 	for probeSNI, patterns := range sniToPatterns {
 		probeSNI := probeSNI
@@ -190,11 +194,12 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 							}
 						}
 					}()
-					target, err := net.DialTimeout(config.Type, config.Dest, probeTimeout)
+					target, err := net.DialTimeout(network, config.Dest, probeTimeout)
 					if err != nil {
 						return
 					}
 					defer target.Close()
+					_ = target.SetDeadline(time.Now().Add(probeTimeout))
 					if config.Xver == 1 || config.Xver == 2 {
 						if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
 							return
@@ -235,11 +240,12 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 							}
 						}
 					}()
-					target, err := net.DialTimeout(config.Type, config.Dest, probeTimeout)
+					target, err := net.DialTimeout(network, config.Dest, probeTimeout)
 					if err != nil {
 						return
 					}
 					defer target.Close()
+					_ = target.SetDeadline(time.Now().Add(probeTimeout))
 					if config.Xver == 1 || config.Xver == 2 {
 						if _, err = proxyproto.HeaderProxyFromAddrs(config.Xver, target.LocalAddr(), target.RemoteAddr()).WriteTo(target); err != nil {
 							return
@@ -345,6 +351,7 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 		if !ran {
 			return c.Conn.Write(b)
 		}
+		_ = c.Conn.SetDeadline(time.Now().Add(time.Duration(CCSProbeStageCount)*CCSProbeWaitDuration + DefaultProbeTimeout))
 		var hasAlert atomic.Bool
 		go func() {
 			defer hasAlert.Store(true)

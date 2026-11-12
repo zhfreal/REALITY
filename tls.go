@@ -137,8 +137,6 @@ func NewRatelimitedConn(conn net.Conn, limit *LimitFallback) net.Conn {
 	}
 }
 
-const DefaultRealityServerBufSize = 17 * 1024
-
 var (
 	size  = DefaultRealityServerBufSize
 	empty = make([]byte, size)
@@ -161,11 +159,33 @@ var (
 
 	realityS2CBufPool = sync.Pool{
 		New: func() any {
-			b := make([]byte, 0, realityInitialS2CBufCap)
+			b := make([]byte, 0, size)
 			return &b
 		},
 	}
 )
+
+func (c *Conn) releaseHandshakeBuffers(force bool) {
+	if c == nil {
+		return
+	}
+	if c.hand != nil && (force || c.hand.Len() == 0) {
+		c.hand.Reset()
+		handPool.Put(c.hand)
+		c.hand = nil
+	}
+	if c.rawInput != nil && (force || c.rawInput.Len() == 0) {
+		if c.rawInput != c.smallInput && c.rawInput.Cap() > maxIdleInputCap {
+			c.rawInput.Reset()
+			rawInputPool.Put(c.rawInput)
+		}
+		c.rawInput = nil
+	}
+	if force {
+		c.smallInput = nil
+		c.out.handshakeBuf = nil
+	}
+}
 
 func Value(vals ...byte) (value int) {
 	for i, val := range vals {
@@ -338,6 +358,9 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 			}
 			break
 		}
+		if hs.c.conn != conn {
+			hs.c.releaseHandshakeBuffers(true)
+		}
 		mutex.Unlock()
 		if hs.c.conn != conn {
 			_ = underlying.SetDeadline(time.Time{})
@@ -363,13 +386,8 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 
 	go func() {
 		s2cBufPtr := realityS2CBufPool.Get().(*[]byte)
+		defer realityS2CBufPool.Put(s2cBufPtr)
 		s2cSaved := (*s2cBufPtr)[:0]
-		defer func() {
-			if cap(s2cSaved) <= size {
-				s2cSaved = s2cSaved[:0]
-				realityS2CBufPool.Put(&s2cSaved)
-			}
-		}()
 		bufPtr := realityServerBufPool.Get().(*[]byte)
 		defer realityServerBufPool.Put(bufPtr)
 		buf := *bufPtr
@@ -596,10 +614,12 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		fmt.Printf("REALITY remoteAddr: %v\ths.c.isHandshakeComplete.Load(): %v\n", remoteAddr, hs.c.isHandshakeComplete.Load())
 	}
 	if hs.c.isHandshakeComplete.Load() {
+		hs.c.releaseHandshakeBuffers(false)
 		_ = conn.SetDeadline(time.Time{})
 		return hs.c, nil
 	}
 
+	hs.c.releaseHandshakeBuffers(true)
 	conn.Close()
 	var failureReason string
 	if hs.clientHello == nil {

@@ -27,6 +27,7 @@ import (
 	"regexp"
 	"runtime"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -609,10 +610,15 @@ type Config struct {
 	LimitFallbackUpload   LimitFallback
 	LimitFallbackDownload LimitFallback
 
-	ProbeTimeout         time.Duration
-	MaxPostHandshakeWait time.Duration
-	HandshakeTimeout     time.Duration
-	FallbackReadDeadline time.Duration
+	ProbeTimeout              time.Duration
+	MaxPostHandshakeWait      time.Duration
+	HandshakeTimeout          time.Duration
+	FallbackReadDeadline      time.Duration
+	DetectReadDeadline        time.Duration
+	PostHandshakePollInterval time.Duration
+	MaxDetectRecordBufferSize int
+	AlertInspectionBufferSize int
+	ProbeSubdomainLen         int
 	// [REALITY] SECTION END
 
 	// Rand provides the source of entropy for the connection.
@@ -1038,33 +1044,51 @@ func (c *Config) ticketKeyFromBytes(b [32]byte) (key ticketKey) {
 const maxSessionTicketLifetime = 7 * 24 * time.Hour
 
 const (
-	DefaultProbeTimeout             = 5 * time.Second
-	DefaultDetectReadDeadline       = 1 * time.Second
-	DefaultPostHandshakeWaitTimeout = 5 * time.Second
-	PostHandshakePollInterval       = 500 * time.Millisecond
-	MaxPostHandshakeWaitAttempts    = 10
-	RecordMinAEADTagLen             = 16
-	RecordHeaderLen                 = 5
-	RecordMinEncryptedLen           = RecordHeaderLen + RecordMinAEADTagLen // 21
-	Mldsa65CertSignatureOffset      = 126
-	DefaultRandomSubdomainLen       = 5
-	DefaultHandshakeTimeout         = 10 * time.Second
-	DefaultFallbackReadDeadline     = 5 * time.Second
-	MaxDetectRecordBufferSize       = 64 * 1024
-	AlertInspectionBufferSize       = 512
-	CCSProbeWaitDuration            = 1 * time.Second
-	CCSProbeStage1Count             = 2
-	CCSProbeStage1MaxResult         = 1
-	CCSProbeStage2Count             = 15
-	CCSProbeStage2MaxResult         = 16
-	CCSProbeStage3Count             = 16
-	CCSProbeStage3MaxResult         = 32
-	RecordTypeChangeCipherSpec      = 0x14
-	RecordTypeAlert                 = 0x15
-	RecordTypeHandshake             = 0x16
-	RecordTypeApplicationData       = 0x17
-	TLS12RecordVersionMajor         = 3
-	TLS12RecordVersionMinor         = 3
+	DefaultProbeTimeout                 = 5 * time.Second
+	DefaultDetectReadDeadline           = 1 * time.Second
+	DefaultPostHandshakeWaitTimeout     = 5 * time.Second
+	DefaultPostHandshakePollInterval   = 500 * time.Millisecond
+	PostHandshakePollInterval           = DefaultPostHandshakePollInterval
+	DefaultMaxPostHandshakeWaitAttempts = 10
+	MaxPostHandshakeWaitAttempts        = DefaultMaxPostHandshakeWaitAttempts
+	RecordMinAEADTagLen                 = 16
+	RecordHeaderLen                     = 5
+	HandshakeHeaderLen                  = 4
+	RecordHeaderTypeOffset              = 0
+	RecordHeaderVersionOffset           = 1
+	RecordHeaderLengthOffset            = 3
+	RecordHeaderLengthEnd               = 5
+	RecordMinEncryptedLen               = RecordHeaderLen + RecordMinAEADTagLen // 21
+	Mldsa65CertSignatureOffset          = 126
+	Mldsa65SignatureSize                = 3309
+	Ed25519PublicKeySize                = 32
+	DefaultRandomSubdomainLen           = 5
+	WildcardPrefix                      = "*."
+	DefaultHandshakeTimeout             = 10 * time.Second
+	DefaultFallbackReadDeadline         = 5 * time.Second
+	DefaultMaxDetectRecordBufferSize   = 64 * 1024
+	MaxDetectRecordBufferSize            = DefaultMaxDetectRecordBufferSize
+	DefaultAlertInspectionBufferSize   = 512
+	AlertInspectionBufferSize            = DefaultAlertInspectionBufferSize
+	CCSProbeWaitDuration                = 1 * time.Second
+	CCSProbeStageCount                  = 3
+	CCSProbeStage1Count                 = 2
+	CCSProbeStage1MaxResult             = 1
+	CCSProbeStage2Count                 = 15
+	CCSProbeStage2MaxResult             = 16
+	CCSProbeStage3Count                 = 16
+	CCSProbeStage3MaxResult             = 32
+	RecordTypeChangeCipherSpec          = 0x14
+	RecordTypeAlert                     = 0x15
+	RecordTypeHandshake                 = 0x16
+	RecordTypeApplicationData           = 0x17
+	TLS12RecordVersionMajor             = 3
+	TLS12RecordVersionMinor             = 3
+
+	RealityALPNNone  = 0
+	RealityALPNHTTP1 = 1
+	RealityALPNHTTP2 = 2
+	RealityALPNCount = 3
 
 	realityIndexServerHello            = 0
 	realityIndexChangeCipherSpec       = 1
@@ -1077,15 +1101,30 @@ const (
 	realityChangeCipherSpecRecordLen   = 6
 	realityChangeCipherSpecPayloadByte = 1
 	realityEncryptedExtensionsMinLen   = 512
-	realityInitialS2CBufCap            = 4096
+	DefaultRealityServerBufSize        = 17 * 1024
+	DefaultRealityInitialS2CBufCap      = DefaultRealityServerBufSize
+	realityInitialS2CBufCap            = DefaultRealityInitialS2CBufCap
 	realityX25519KeyLen                = 32
 	realitySessionIDLen                = 32
 	realityAuthKeyHKDFSaltLen          = 20
 	realityAuthKeyLen                  = 32
 	realityProbeBufLen                 = 1
+	realityClientVerOffset             = 0
+	realityClientVerLen                = 3
 	realityClientTimeOffset            = 4
+	realityClientTimeLen               = 4
 	realityClientShortIDOffset         = 8
+	realityClientShortIDLen            = 8
+
+	VersionShiftMajor = 16
+	VersionShiftMinor = 8
+	VersionMaxParts   = 3
+	BitsPerByte       = 8
 )
+
+func RealityCacheKey(dest, sni string, alpn int) string {
+	return dest + " " + sni + " " + strconv.Itoa(alpn)
+}
 
 var globalServerNameRegexCache sync.Map
 
@@ -1235,10 +1274,15 @@ func (c *Config) Clone() *Config {
 		Mldsa65Key:               c.Mldsa65Key,
 		LimitFallbackUpload:      c.LimitFallbackUpload,
 		LimitFallbackDownload:    c.LimitFallbackDownload,
-		ProbeTimeout:             c.ProbeTimeout,
-		MaxPostHandshakeWait:     c.MaxPostHandshakeWait,
-		HandshakeTimeout:         c.HandshakeTimeout,
-		FallbackReadDeadline:     c.FallbackReadDeadline,
+		ProbeTimeout:              c.ProbeTimeout,
+		MaxPostHandshakeWait:      c.MaxPostHandshakeWait,
+		HandshakeTimeout:          c.HandshakeTimeout,
+		FallbackReadDeadline:      c.FallbackReadDeadline,
+		DetectReadDeadline:        c.DetectReadDeadline,
+		PostHandshakePollInterval: c.PostHandshakePollInterval,
+		MaxDetectRecordBufferSize: c.MaxDetectRecordBufferSize,
+		AlertInspectionBufferSize: c.AlertInspectionBufferSize,
+		ProbeSubdomainLen:         c.ProbeSubdomainLen,
 		// [REALITY] SECTION END
 		Rand:                                c.Rand,
 		Time:                                c.Time,

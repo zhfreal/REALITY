@@ -82,12 +82,11 @@ var (
 func ensureRealityCerts() {
 	realityCertOnce.Do(func() {
 		certificate := x509.Certificate{SerialNumber: &big.Int{}}
-		const mldsa65SignatureSize = 3309
-									var mldsaPlaceholder [mldsa65SignatureSize]byte
+		var mldsaPlaceholder [Mldsa65SignatureSize]byte
 		certificateMldsa65 := x509.Certificate{SerialNumber: &big.Int{}, ExtraExtensions: []pkix.Extension{{Id: []int{0, 0}, Value: mldsaPlaceholder[:]}}}
 		_, ed25519Priv, _ = ed25519.GenerateKey(rand.Reader)
-		signedCert, _ = x509.CreateCertificate(rand.Reader, &certificate, &certificate, ed25519.PublicKey(ed25519Priv[32:]), ed25519Priv)
-		signedCertMldsa65, _ = x509.CreateCertificate(rand.Reader, &certificateMldsa65, &certificateMldsa65, ed25519.PublicKey(ed25519Priv[32:]), ed25519Priv)
+		signedCert, _ = x509.CreateCertificate(rand.Reader, &certificate, &certificate, ed25519.PublicKey(ed25519Priv[Ed25519PublicKeySize:]), ed25519Priv)
+		signedCertMldsa65, _ = x509.CreateCertificate(rand.Reader, &certificateMldsa65, &certificateMldsa65, ed25519.PublicKey(ed25519Priv[Ed25519PublicKeySize:]), ed25519Priv)
 	})
 }
 
