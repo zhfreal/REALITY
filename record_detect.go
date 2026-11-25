@@ -206,9 +206,11 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 						}
 					}
 					detectConn := &PostHandshakeRecordDetectConn{
-						Conn: target,
-						Key:  probeKey,
-						Keys: keys,
+						Conn:          target,
+						Key:           probeKey,
+						Keys:          keys,
+						ReadDeadline:  config.DetectReadDeadline,
+						MaxBufferSize: int64(config.MaxDetectRecordBufferSize),
 					}
 					fingerprint := utls.HelloChrome_Auto
 					nextProtos := []string{"h2", "http/1.1"}
@@ -263,9 +265,10 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 						nextProtos = nil
 					}
 					conn := &CCSDetectConn{
-						Conn: target,
-						Key:  probeKey,
-						Keys: keys,
+						Conn:         target,
+						Key:          probeKey,
+						Keys:         keys,
+						AlertBufSize: config.AlertInspectionBufferSize,
 					}
 					uConn := utls.UClient(conn, &utls.Config{
 						ServerName: probeSNI,
@@ -284,9 +287,11 @@ func DetectPostHandshakeRecordsLens(config *Config) {
 
 type PostHandshakeRecordDetectConn struct {
 	net.Conn
-	Key     string
-	Keys    []string
-	CcsSent bool
+	Key           string
+	Keys          []string
+	CcsSent       bool
+	ReadDeadline  time.Duration
+	MaxBufferSize int64
 }
 
 func (c *PostHandshakeRecordDetectConn) storeResult(lens []int) {
@@ -308,8 +313,16 @@ func (c *PostHandshakeRecordDetectConn) Read(b []byte) (n int, err error) {
 	if !c.CcsSent {
 		return c.Conn.Read(b)
 	}
-	c.Conn.SetReadDeadline(time.Now().Add(DefaultDetectReadDeadline))
-	data, _ := io.ReadAll(io.LimitReader(c.Conn, MaxDetectRecordBufferSize))
+	readDeadline := c.ReadDeadline
+	if readDeadline <= 0 {
+		readDeadline = DefaultDetectReadDeadline
+	}
+	maxBuf := c.MaxBufferSize
+	if maxBuf <= 0 {
+		maxBuf = MaxDetectRecordBufferSize
+	}
+	c.Conn.SetReadDeadline(time.Now().Add(readDeadline))
+	data, _ := io.ReadAll(io.LimitReader(c.Conn, maxBuf))
 	var postHandshakeRecordsLens []int
 	for {
 		if len(data) >= RecordHeaderLen && (data[0] == RecordTypeApplicationData && data[1] == TLS12RecordVersionMajor && data[2] == TLS12RecordVersionMinor) {
@@ -331,9 +344,10 @@ var CCSMsg = []byte{RecordTypeChangeCipherSpec, TLS12RecordVersionMajor, TLS12Re
 
 type CCSDetectConn struct {
 	net.Conn
-	Key     string
-	Keys    []string
-	ccsOnce sync.Once
+	Key          string
+	Keys         []string
+	AlertBufSize int
+	ccsOnce      sync.Once
 }
 
 func (c *CCSDetectConn) storeResult(maxCount int) {
@@ -355,7 +369,11 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 		var hasAlert atomic.Bool
 		go func() {
 			defer hasAlert.Store(true)
-			buf := make([]byte, AlertInspectionBufferSize)
+			alertBufSize := c.AlertBufSize
+			if alertBufSize <= 0 {
+				alertBufSize = AlertInspectionBufferSize
+			}
+			buf := make([]byte, alertBufSize)
 			for {
 				nRead, readErr := c.Conn.Read(buf)
 				if readErr != nil {
@@ -368,12 +386,11 @@ func (c *CCSDetectConn) Write(b []byte) (n int, err error) {
 		}()
 		sendProbePayload := func(count int) bool {
 			msg := bytes.Repeat(CCSMsg, count)
-			c.Conn.Write(msg)
-			time.Sleep(CCSProbeWaitDuration)
-			if hasAlert.Load() {
+			if _, wErr := c.Conn.Write(msg); wErr != nil {
 				return true
 			}
-			return false
+			time.Sleep(CCSProbeWaitDuration)
+			return hasAlert.Load()
 		}
 		if sendProbePayload(CCSProbeStage1Count) {
 			c.storeResult(CCSProbeStage1MaxResult)
