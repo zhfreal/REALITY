@@ -15,8 +15,8 @@ github.com/pires/go-proxyproto v0.15.0 h1:dTshmNbFm/D+0+sbrxUuddPOZ5Y0B7c5NhtsBk
 github.com/pires/go-proxyproto v0.15.0/go.mod h1:OXsCrKwrK2tXS9YrI5tkHx5xaQlO8FH3lFW76orFh24=
 github.com/xyproto/randomstring v1.0.5 h1:YtlWPoRdgMu3NZtP45drfy1GKoojuR7hmRcnhZqKjWU=
 github.com/xyproto/randomstring v1.0.5/go.mod h1:rgmS5DeNXLivK7YprL0pY+lTuhNQW3iGxZ18UQApw/E=
-github.com/zhfreal/utls v1.9.0-patch15 h1:e3XBJ+GS2d2aDJGfknY9/fv30naaZXjjNgTIC1MO6lM=
-github.com/zhfreal/utls v1.9.0-patch15/go.mod h1:i8tOTUIrP/HVu3x01JAyMQVEGv3i1KnrY0hW3LwbGWU=
+github.com/zhfreal/utls v1.9.0-patch16 h1:LeHzMjsDBQ5QalBXqQkBMX+gJIMQgtiaBnUplHncddM=
+github.com/zhfreal/utls v1.9.0-patch16/go.mod h1:i8tOTUIrP/HVu3x01JAyMQVEGv3i1KnrY0hW3LwbGWU=
 golang.org/x/crypto v0.57.0 h1:3ZVCjf8Ggz7zneR/EHRVx68Ctf+2pmIMP2UFhh9cC6M=
 golang.org/x/crypto v0.57.0/go.mod h1:Fdz0i5U6CoizGwLda9DttjSk6qlZo25zYNtR+ycvuZA=
 golang.org/x/exp v0.0.0-20240904232852-e7e105dedf7e h1:I88y4caeGeuDQxgdoFPUq097j7kNfw6uvuiNxUBfcBk=

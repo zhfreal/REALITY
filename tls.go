@@ -271,6 +271,13 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 	underlying := raw // may implement CloseWriteConn
 
 	mutex := new(sync.Mutex)
+	var clearFallbackDeadlinesOnce sync.Once
+	clearFallbackDeadlines := func() {
+		clearFallbackDeadlinesOnce.Do(func() {
+			_ = underlying.SetDeadline(time.Time{})
+			_ = target.SetDeadline(time.Time{})
+		})
+	}
 
 	hs := serverHandshakeStateTLS13{
 		c: &Conn{
@@ -382,8 +389,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		}
 		mutex.Unlock()
 		if hs.c.conn != conn {
-			_ = underlying.SetDeadline(time.Time{})
-			_ = target.SetDeadline(time.Time{})
+			clearFallbackDeadlines()
 			if config.Show && hs.clientHello != nil {
 				fmt.Printf("REALITY remoteAddr: %v\tforwarded SNI: %v\n", remoteAddr, hs.clientHello.serverName)
 			}
@@ -612,8 +618,7 @@ func Server(ctx context.Context, conn net.Conn, config *Config) (*Conn, error) {
 		}
 		mutex.Unlock()
 		if hs.c.out.handshakeLen[realityIndexServerHello] == 0 { // if the target sent an incorrect Server Hello, or before that
-			_ = underlying.SetDeadline(time.Time{})
-			_ = target.SetDeadline(time.Time{})
+			clearFallbackDeadlines()
 			if hs.c.conn == conn { // if we processed the Client Hello successfully but the target did not
 				waitGroup.Add(1)
 				go func() {

@@ -2,8 +2,14 @@ package reality
 
 import (
 	"bytes"
+	"context"
+	"crypto/ecdh"
+	"crypto/rand"
+	"io"
+	"net"
 	"sync"
 	"testing"
+	"time"
 )
 
 func TestWildcardMatching(t *testing.T) {
@@ -207,5 +213,165 @@ func TestReleaseHandshakeBuffers(t *testing.T) {
 	c.releaseHandshakeBuffers(true)
 	if c.hand != nil || c.rawInput != nil || c.smallInput != nil || c.out.handshakeBuf != nil {
 		t.Fatal("expected all handshake buffers to be released and nilled when force=true")
+	}
+}
+
+type fallbackDeadlineEvent struct {
+	op   string
+	zero bool
+}
+
+type deadlineRecordingConn struct {
+	net.Conn
+	mu     sync.Mutex
+	events []fallbackDeadlineEvent
+}
+
+func (c *deadlineRecordingConn) SetDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.events = append(c.events, fallbackDeadlineEvent{op: "SetDeadline", zero: t.IsZero()})
+	c.mu.Unlock()
+	return c.Conn.SetDeadline(t)
+}
+
+func (c *deadlineRecordingConn) SetReadDeadline(t time.Time) error {
+	c.mu.Lock()
+	c.events = append(c.events, fallbackDeadlineEvent{op: "SetReadDeadline", zero: t.IsZero()})
+	c.mu.Unlock()
+	return c.Conn.SetReadDeadline(t)
+}
+
+func (c *deadlineRecordingConn) CloseWrite() error {
+	if cw, ok := c.Conn.(interface{ CloseWrite() error }); ok {
+		return cw.CloseWrite()
+	}
+	return nil
+}
+
+func (c *deadlineRecordingConn) assertNoZeroClearAfterReadDeadline(t *testing.T, name string) {
+	t.Helper()
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	zeroSetDeadlines := 0
+	sawNonZeroReadDeadline := false
+	for _, ev := range c.events {
+		if ev.op == "SetReadDeadline" && !ev.zero {
+			sawNonZeroReadDeadline = true
+		}
+		if ev.op == "SetDeadline" && ev.zero {
+			zeroSetDeadlines++
+			if sawNonZeroReadDeadline {
+				t.Fatalf("%s: SetDeadline(zero) called after SetReadDeadline(nonzero): %+v", name, c.events)
+			}
+		}
+	}
+	if zeroSetDeadlines > 1 {
+		t.Fatalf("%s: expected SetDeadline(zero) at most once, got %d (%+v)", name, zeroSetDeadlines, c.events)
+	}
+}
+
+func TestFallbackDeadlinesClearedOnce(t *testing.T) {
+	targetLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen target: %v", err)
+	}
+	defer targetLn.Close()
+
+	targetDone := make(chan struct{})
+	go func() {
+		defer close(targetDone)
+		conn, err := targetLn.Accept()
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		buf := make([]byte, 256)
+		_, _ = conn.Read(buf)
+		_, _ = io.WriteString(conn, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+		if cw, ok := conn.(interface{ CloseWrite() error }); ok {
+			_ = cw.CloseWrite()
+		}
+		_, _ = io.Copy(io.Discard, conn)
+	}()
+
+	frontLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen frontend: %v", err)
+	}
+	defer frontLn.Close()
+
+	priv, err := ecdh.X25519().GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	var targetTrackerMu sync.Mutex
+	var trackedTarget *deadlineRecordingConn
+
+	cfg := &Config{
+		Type:                 "tcp",
+		Dest:                 targetLn.Addr().String(),
+		ServerNames:          map[string]bool{"example.com": true},
+		PrivateKey:           priv,
+		ShortIds:             map[[8]byte]bool{{1}: true},
+		HandshakeTimeout:     2 * time.Second,
+		FallbackReadDeadline: 80 * time.Millisecond,
+		DialContext: func(ctx context.Context, network, address string) (net.Conn, error) {
+			raw, err := (&net.Dialer{}).DialContext(ctx, network, address)
+			if err != nil {
+				return nil, err
+			}
+			wrapped := &deadlineRecordingConn{Conn: raw}
+			targetTrackerMu.Lock()
+			trackedTarget = wrapped
+			targetTrackerMu.Unlock()
+			return wrapped, nil
+		},
+	}
+
+	serverDone := make(chan error, 1)
+	var trackedUnderlying *deadlineRecordingConn
+	go func() {
+		raw, err := frontLn.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		trackedUnderlying = &deadlineRecordingConn{Conn: raw}
+		_, err = Server(context.Background(), trackedUnderlying, cfg)
+		serverDone <- err
+	}()
+
+	client, err := net.Dial("tcp", frontLn.Addr().String())
+	if err != nil {
+		t.Fatalf("dial frontend: %v", err)
+	}
+	defer client.Close()
+
+	if _, err := io.WriteString(client, "GET / HTTP/1.1\r\nHost: example.com\r\n\r\n"); err != nil {
+		t.Fatalf("client write: %v", err)
+	}
+	resp, err := io.ReadAll(client)
+	if err != nil {
+		t.Fatalf("client read: %v", err)
+	}
+	if len(resp) == 0 {
+		t.Fatal("expected fallback response from target")
+	}
+
+	select {
+	case <-serverDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Server hung after fallback half-close (FallbackReadDeadline may have been cleared)")
+	}
+	<-targetDone
+
+	trackedUnderlying.assertNoZeroClearAfterReadDeadline(t, "underlying")
+	targetTrackerMu.Lock()
+	tgt := trackedTarget
+	targetTrackerMu.Unlock()
+	if tgt != nil {
+		tgt.assertNoZeroClearAfterReadDeadline(t, "target")
 	}
 }

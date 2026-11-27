@@ -18,4 +18,4 @@ require (
 	gopkg.in/check.v1 v1.0.0-20201130134442-10cb98267c6c // indirect
 )
 
-replace github.com/metacubex/utls => github.com/zhfreal/utls v1.9.0-patch15
+replace github.com/metacubex/utls => github.com/zhfreal/utls v1.9.0-patch16
